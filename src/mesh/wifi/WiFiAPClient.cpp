@@ -332,6 +332,54 @@ void deinitWifi()
     }
 }
 
+#if defined(ARCH_ESP32) && defined(KOLDNET_WIFI_AP)
+// koldnet: run as a Wi-Fi access point instead of a station (TASK-20261123-03).
+// Built only into env heltec-v3-koldnet-ap. network.wifi_ssid / wifi_psk become the
+// AP's own SSID and WPA2 passphrase, set over the API at run time, never compiled in.
+// The node serves its TCP API (4403) at KOLDNET_WIFI_AP_IP to the stations that join.
+#ifndef KOLDNET_WIFI_AP_CHANNEL
+#define KOLDNET_WIFI_AP_CHANNEL 6
+#endif
+#ifndef KOLDNET_WIFI_AP_MAX_CLIENTS
+#define KOLDNET_WIFI_AP_MAX_CLIENTS 2
+#endif
+static bool koldnetStartAccessPoint(const char *wifiName, const char *wifiPsw)
+{
+    // WPA2 needs 8 to 63 characters; an open access point is refused.
+    if (!wifiPsw || strlen(wifiPsw) < 8 || strlen(wifiPsw) > 63) {
+        LOG_ERROR("koldnet AP: password missing or not 8 to 63 characters; access point not started");
+        return false;
+    }
+    uint8_t dmac[6];
+    getMacAddr(dmac);
+    snprintf(ourHost, sizeof(ourHost), "Meshtastic-%02x%02x", dmac[4], dmac[5]);
+
+    WiFi.mode(WIFI_AP);
+    WiFi.onEvent(WiFiEvent);
+    const IPAddress apIP(192, 168, 4, 1);
+    const IPAddress apMask(255, 255, 255, 0);
+    if (!WiFi.softAPConfig(apIP, apIP, apMask)) {
+        LOG_ERROR("koldnet AP: softAPConfig failed");
+        return false;
+    }
+    if (!WiFi.softAP(wifiName, wifiPsw, KOLDNET_WIFI_AP_CHANNEL, 0, KOLDNET_WIFI_AP_MAX_CLIENTS)) {
+        LOG_ERROR("koldnet AP: softAP failed");
+        return false;
+    }
+    WiFi.softAPsetHostname(ourHost);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+#if !MESHTASTIC_EXCLUDE_WEBSERVER
+    createSSLCert();
+#endif
+    LOG_INFO("koldnet AP: ssid %s, channel %d, max %d clients, address %s", wifiName, KOLDNET_WIFI_AP_CHANNEL,
+             KOLDNET_WIFI_AP_MAX_CLIENTS, WiFi.softAPIP().toString().c_str());
+    // No station reconnect loop in AP mode: start the network services (API server) now.
+    onNetworkConnected();
+    return true;
+}
+#endif
+
 // Startup WiFi
 bool initWifi()
 {
@@ -346,6 +394,10 @@ bool initWifi()
         if (!*wifiPsw) // Treat empty password as no password
             wifiPsw = NULL;
 
+#if defined(ARCH_ESP32) && defined(KOLDNET_WIFI_AP)
+        if (*wifiName)
+            return koldnetStartAccessPoint(wifiName, wifiPsw);
+#endif
         if (*wifiName) {
             uint8_t dmac[6];
             getMacAddr(dmac);

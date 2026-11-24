@@ -244,6 +244,14 @@ HopDecision decideHop(const Routed &r, uint32_t self, uint32_t dest, uint8_t rel
     return d;
 }
 
+bool isListedRelayByte(const Routed &r, uint8_t relayByte)
+{
+    for (uint8_t i = 0; i < r.n; i++)
+        if (lastByte(r.route[i]) == relayByte)
+            return true;
+    return false;
+}
+
 bool deliveredByRoute(const Routed &r, uint8_t relayByte, uint8_t hopsTaken, bool injected)
 {
     if (r.flags & FLAG_OFF_ROUTE)

@@ -195,6 +195,15 @@ static void test_delivered_by_route_needs_the_last_relay_the_hop_count_and_no_of
     TEST_ASSERT_FALSE(deliveredByRoute(r, lastByte(E), 2, false));
 }
 
+// E14: a no-preference copy from a listed relay is that relay's fallback flood.
+static void test_listed_relay_byte_identifies_a_fallback_flood_source()
+{
+    Routed r = routed({F, E});
+    TEST_ASSERT_TRUE(isListedRelayByte(r, 0xfc));
+    TEST_ASSERT_TRUE(isListedRelayByte(r, 0x54));
+    TEST_ASSERT_FALSE(isListedRelayByte(r, lastByte(A)));
+}
+
 // E2 / E14 / E15: last retry floods unless strict (D2).
 static void test_last_retry_floods_unless_strict()
 {
@@ -263,6 +272,7 @@ void setup()
     RUN_TEST(test_injecting_gateway_forwards_to_the_first_relay);
     RUN_TEST(test_copy_from_an_unlisted_relay_is_marked_off_route);
     RUN_TEST(test_delivered_by_route_needs_the_last_relay_the_hop_count_and_no_off_route_flag);
+    RUN_TEST(test_listed_relay_byte_identifies_a_fallback_flood_source);
     RUN_TEST(test_last_retry_floods_unless_strict);
     RUN_TEST(test_route_fail_and_receipt_round_trip);
     RUN_TEST(test_last_byte_zero_maps_to_ff);

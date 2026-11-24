@@ -59,6 +59,20 @@ bool NextHopRouter::shouldFilterReceived(const meshtastic_MeshPacket *p)
 
     if (seenRecently) {
         printPacket("Ignore dupe incoming msg", p);
+#if !MESHTASTIC_EXCLUDE_KROUTE
+        // koldnet SPEC-0002 E14: a listed relay's last-retry flood (next_hop 0) of a forced route. Stock 2.7.26 only
+        // treats a copy as a fallback when we had relayed it ourselves, so a node that merely overheard the directed
+        // copy drops the flood as a dupe (upstream #9862). For forced routes, fork bystanders relay it once.
+        if (!wasFallback && p->next_hop == NO_NEXT_HOP_PREFERENCE && !isToUs(p) && !isFromUs(p)) {
+            kroute::Routed kr;
+            uint8_t ours = nodeDB->getLastByteOfNodeNum(getNodeNum());
+            if (krouteDecodeRouted(p, &kr) && !(kr.flags & kroute::FLAG_STRICT) && kroute::isListedRelayByte(kr, p->relay_node) &&
+                !wasRelayer(ours, p->id, getFrom(p))) {
+                LOG_INFO("koldnet KROUTE: 0x%08x fallback flood from listed relay 0x%02x; relaying once", p->id, p->relay_node);
+                wasFallback = true;
+            }
+        }
+#endif
 
         if (p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA) {
             rxDupe++;

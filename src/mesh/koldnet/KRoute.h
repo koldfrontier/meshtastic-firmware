@@ -144,6 +144,9 @@ inline LastRetry onLastRetry(const Routed &r)
     return (r.flags & FLAG_STRICT) ? LastRetry::FAIL : LastRetry::FLOOD;
 }
 
+/** True when relayByte is the last byte of a listed relay: a no-preference copy from it is that relay's fallback flood. */
+bool isListedRelayByte(const Routed &r, uint8_t relayByte);
+
 /** At the destination: did it come the forced way? */
 bool deliveredByRoute(const Routed &r, uint8_t relayByte, uint8_t hopsTaken, bool injected);
 

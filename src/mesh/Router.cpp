@@ -2,6 +2,9 @@
 #if KOLDNET_TEST_LINKS && !MESHTASTIC_EXCLUDE_KROUTE
 #include "modules/KRouteModule.h"
 #endif
+#if !MESHTASTIC_EXCLUDE_KROUTE
+#include "mesh/koldnet/KRoute.h"
+#endif
 #include "Channels.h"
 #include "CryptoEngine.h"
 #include "MeshRadio.h"
@@ -659,7 +662,7 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
             p->decoded.portnum != meshtastic_PortNum_ROUTING_APP && p->decoded.portnum != meshtastic_PortNum_POSITION_APP
 #if !MESHTASTIC_EXCLUDE_KROUTE
             // koldnet SPEC-0002 D4: forced routes travel on the channel key, so relays can read the route
-            && p->decoded.portnum != (meshtastic_PortNum)257
+            && p->decoded.portnum != (meshtastic_PortNum)kroute::PORT
 #endif
         ) {
             LOG_DEBUG("Use PKI!");

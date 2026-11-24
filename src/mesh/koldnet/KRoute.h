@@ -1,5 +1,5 @@
 #pragma once
-// koldnet forced routes (SPEC-0002 #interfaces): the KROUTE wrapper on port 257.
+// koldnet forced routes (SPEC-0002 #interfaces): the KROUTE wrapper on port 331 (D8: 257 is upstream ATAK_FORWARDER).
 // Pure logic: no Router, NodeDB, radio or Arduino include, so it is tested on
 // the host (test/test_kroute). The firmware glue is in NextHopRouter and
 // KRouteModule.
@@ -10,7 +10,7 @@
 namespace kroute
 {
 
-constexpr uint16_t PORT = 257;
+constexpr uint16_t PORT = 331;
 constexpr uint8_t MAGIC = 0x4B;
 constexpr uint8_t VERSION = 1;
 

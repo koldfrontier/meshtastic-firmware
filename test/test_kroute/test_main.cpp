@@ -3,6 +3,7 @@
 #include "TestUtil.h"
 #include "configuration.h" // Arduino.h: setup() and loop() with C linkage
 #include "mesh/koldnet/KRoute.h"
+#include "meshtastic/portnums.pb.h"
 #include <initializer_list>
 #include <string.h>
 #include <unity.h>
@@ -28,6 +29,14 @@ static Routed routed(std::initializer_list<uint32_t> hops, uint8_t flags = 0, co
     r.inner = (const uint8_t *)inner;
     r.innerLen = strlen(inner);
     return r;
+}
+
+// D8: the wrapper's port is in the private range and clashes with no upstream port number.
+static void test_port_is_private_and_not_an_upstream_port()
+{
+    TEST_ASSERT_EQUAL_UINT16(331, PORT);
+    TEST_ASSERT_TRUE(PORT > meshtastic_PortNum_PRIVATE_APP && PORT < meshtastic_PortNum_MAX);
+    TEST_ASSERT_TRUE(PORT != meshtastic_PortNum_ATAK_FORWARDER);
 }
 
 static void test_round_trip_keeps_route_flags_and_inner()
@@ -261,6 +270,7 @@ void setup()
 {
     initializeTestEnvironment();
     UNITY_BEGIN();
+    RUN_TEST(test_port_is_private_and_not_an_upstream_port);
     RUN_TEST(test_round_trip_keeps_route_flags_and_inner);
     RUN_TEST(test_repeated_relay_or_endpoint_is_refused);
     RUN_TEST(test_route_length_is_bounded_by_hop_limit);

@@ -1,12 +1,12 @@
 #pragma once
-// koldnet forced routes (SPEC-0002): the destination side of the KROUTE wrapper on port 257,
+// koldnet forced routes (SPEC-0002): the destination side of the KROUTE wrapper on port 331,
 // and the test-only link filter. The relay side is in NextHopRouter.
 #include "SinglePortModule.h"
 #include "mesh/koldnet/KRoute.h"
 
 #if !MESHTASTIC_EXCLUDE_KROUTE
 
-/** Decode a ROUTED wrapper from a decoded packet on port 257. False for anything else. */
+/** Decode a ROUTED wrapper from a decoded packet on kroute::PORT (331). False for anything else. */
 bool krouteDecodeRouted(const meshtastic_MeshPacket *p, kroute::Routed *r);
 
 class KRouteModule : public SinglePortModule

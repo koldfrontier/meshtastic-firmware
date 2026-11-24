@@ -1,4 +1,7 @@
 #include "Router.h"
+#if KOLDNET_TEST_LINKS && !MESHTASTIC_EXCLUDE_KROUTE
+#include "modules/KRouteModule.h"
+#endif
 #include "Channels.h"
 #include "CryptoEngine.h"
 #include "MeshRadio.h"
@@ -653,7 +656,12 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
             config.security.private_key.size == 32 && !isBroadcast(p->to) &&
             // Some portnums either make no sense to send with PKC
             p->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP && p->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
-            p->decoded.portnum != meshtastic_PortNum_ROUTING_APP && p->decoded.portnum != meshtastic_PortNum_POSITION_APP) {
+            p->decoded.portnum != meshtastic_PortNum_ROUTING_APP && p->decoded.portnum != meshtastic_PortNum_POSITION_APP
+#if !MESHTASTIC_EXCLUDE_KROUTE
+            // koldnet SPEC-0002 D4: forced routes travel on the channel key, so relays can read the route
+            && p->decoded.portnum != (meshtastic_PortNum)257
+#endif
+        ) {
             LOG_DEBUG("Use PKI!");
             if (numbytes + MESHTASTIC_HEADER_LENGTH + MESHTASTIC_PKC_OVERHEAD > MAX_LORA_PAYLOAD_LEN)
                 return meshtastic_Routing_Error_TOO_LARGE;
@@ -846,6 +854,14 @@ void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
     }
 #endif
     // assert(radioConfig.has_preferences);
+#if KOLDNET_TEST_LINKS && !MESHTASTIC_EXCLUDE_KROUTE
+    // koldnet test builds only (SPEC-0002 D7): a logical topology on a bench where every node hears every other.
+    if (p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA && krouteTestLinks.drops(p->relay_node)) {
+        LOG_DEBUG("koldnet TEST_LINKS: drop 0x%08x from 0x%x relayed by 0x%02x", p->id, p->from, p->relay_node);
+        packetPool.release(p);
+        return;
+    }
+#endif
     if (is_in_repeated(config.lora.ignore_incoming, p->from)) {
         LOG_DEBUG("Ignore msg, 0x%x is in our ignore list", p->from);
         packetPool.release(p);

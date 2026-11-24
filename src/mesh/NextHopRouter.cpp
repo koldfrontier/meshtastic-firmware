@@ -5,6 +5,11 @@
 #include "modules/TraceRouteModule.h"
 #endif
 #include "NodeDB.h"
+#if !MESHTASTIC_EXCLUDE_KROUTE
+#include "MeshService.h"
+#include "modules/KRouteModule.h"
+#include <vector>
+#endif
 
 NextHopRouter::NextHopRouter() {}
 
@@ -24,6 +29,11 @@ ErrorCode NextHopRouter::send(meshtastic_MeshPacket *p)
     wasSeenRecently(p);                                         // FIXME, move this to a sniffSent method
 
     p->next_hop = getNextHop(p->to, p->relay_node).value_or(NO_NEXT_HOP_PREFERENCE); // set the next hop
+#if !MESHTASTIC_EXCLUDE_KROUTE
+    // koldnet forced route (SPEC-0002): the route in the payload decides the next hop, not the NodeDB.
+    if (auto kr = krouteNextHop(p))
+        p->next_hop = *kr;
+#endif
     LOG_DEBUG("Setting next hop for packet with dest %x to %x", p->to, p->next_hop);
 
     // If it's from us, ReliableRouter already handles retransmissions if want_ack is set. If a next hop is set and hop limit is
@@ -126,6 +136,11 @@ void NextHopRouter::sniffReceived(const meshtastic_MeshPacket *p, const meshtast
 /* Check if we should be rebroadcasting this packet if so, do so. */
 bool NextHopRouter::perhapsRebroadcast(const meshtastic_MeshPacket *p)
 {
+#if !MESHTASTIC_EXCLUDE_KROUTE
+    int kr = perhapsRebroadcastKRoute(p);
+    if (kr >= 0)
+        return kr == 1;
+#endif
     if (!isToUs(p) && !isFromUs(p) && p->hop_limit > 0) {
         if (p->id != 0) {
             if (isRebroadcaster()) {
@@ -283,6 +298,21 @@ int32_t NextHopRouter::doRetransmissions()
                               p.packet->id);
                     sendAckNak(meshtastic_Routing_Error_MAX_RETRANSMIT, getFrom(p.packet), p.packet->id, p.packet->channel);
                 }
+#if !MESHTASTIC_EXCLUDE_KROUTE
+                kroute::Routed kr;
+                if (!isFromUs(p.packet) && !isBroadcast(p.packet->to) && krouteDecodeRouted(p.packet, &kr) &&
+                    (kr.flags & kroute::FLAG_STRICT)) {
+                    // A strict forced route died at our next hop: tell the origin which link (SPEC-0002 #interfaces).
+                    auto h = kroute::decideHop(kr, getNodeNum(), p.packet->to, 0,
+                                               p.packet->transport_mechanism ==
+                                                   meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT);
+                    uint8_t reason = nodeDB->getMeshNode(h.next) ? kroute::FAIL_NO_RELAY : kroute::FAIL_NOT_IN_NODEDB;
+                    LOG_INFO("koldnet KROUTE: strict route 0x%08x failed at 0x%08x -> 0x%08x, ROUTE_FAIL to 0x%08x", p.packet->id,
+                             getNodeNum(), h.next, getFrom(p.packet));
+                    if (auto f = krouteAllocRouteFail(p.packet, h.next, reason))
+                        krouteDeferred.push_back(f); // sent after the loop: sending may change `pending`
+                }
+#endif
                 // Note: we don't stop retransmission here, instead the Nak packet gets processed in sniffReceived
                 stopRetransmission(it->first);
                 stillValid = false; // just deleted it
@@ -291,6 +321,19 @@ int32_t NextHopRouter::doRetransmissions()
                           p.packet->id, p.numRetransmissions);
 
                 if (!isBroadcast(p.packet->to)) {
+#if !MESHTASTIC_EXCLUDE_KROUTE
+                    kroute::Routed kr;
+                    bool strictRoute =
+                        p.numRetransmissions == 1 && krouteDecodeRouted(p.packet, &kr) && (kr.flags & kroute::FLAG_STRICT);
+                    if (strictRoute) {
+                        // SPEC-0002 D2, strict: the last retry stays directed (no flood) and the learned next hop is
+                        // kept. If that fails too, the relay sends ROUTE_FAIL (numRetransmissions == 0 above).
+                        LOG_INFO("koldnet KROUTE: strict route 0x%08x, last retry stays on next hop 0x%02x", p.packet->id,
+                                 p.packet->next_hop);
+                        // FloodingRouter::send keeps the header next hop; NextHopRouter::send would restart this record.
+                        FloodingRouter::send(packetPool.allocCopy(*p.packet));
+                    } else
+#endif
                     if (p.numRetransmissions == 1) {
                         // Last retransmission, reset next_hop (fallback to FloodingRouter)
                         p.packet->next_hop = NO_NEXT_HOP_PREFERENCE;
@@ -324,6 +367,12 @@ int32_t NextHopRouter::doRetransmissions()
         }
     }
 
+#if !MESHTASTIC_EXCLUDE_KROUTE
+    for (auto f : krouteDeferred)
+        service->sendToMesh(f);
+    krouteDeferred.clear();
+#endif
+
     return d;
 }
 
@@ -336,3 +385,56 @@ void NextHopRouter::setNextTx(PendingPacket *pending)
     printPacket("", pending->packet);
     setReceivedMessage(); // Run ASAP, so we can figure out our correct sleep time
 }
+
+#if !MESHTASTIC_EXCLUDE_KROUTE
+/**
+ * koldnet forced route: the header next hop for a ROUTED packet we are about to send, or nullopt to leave the
+ * stock choice. The origin sends to route[0]; a listed relay to the next listed hop or the destination; the gateway
+ * that took the packet from MQTT to route[0]. SPEC-0002 #interfaces.
+ */
+std::optional<uint8_t> NextHopRouter::krouteNextHop(const meshtastic_MeshPacket *p)
+{
+    kroute::Routed r;
+    if (isBroadcast(p->to) || !krouteDecodeRouted(p, &r))
+        return std::nullopt;
+    if (isFromUs(p))
+        return kroute::firstHopByte(r);
+    bool injector = p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT;
+    auto h = kroute::decideHop(r, getNodeNum(), p->to, 0, injector);
+    if (h.action == kroute::HopDecision::FORWARD)
+        return h.nextByte;
+    return std::nullopt;
+}
+
+/**
+ * koldnet forced route relay. Returns -1 when stock rules apply (not a ROUTED packet, or we are neither listed nor
+ * the injecting gateway), 1 when we relayed, 0 when we must not relay.
+ */
+int NextHopRouter::perhapsRebroadcastKRoute(const meshtastic_MeshPacket *p)
+{
+    if (isToUs(p) || isFromUs(p) || p->hop_limit == 0 || p->id == 0 || isBroadcast(p->to) || !isRebroadcaster())
+        return -1;
+    kroute::Routed r;
+    if (!krouteDecodeRouted(p, &r))
+        return -1;
+    bool injector = p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT;
+    auto h = kroute::decideHop(r, getNodeNum(), p->to, p->relay_node, injector);
+    if (h.action != kroute::HopDecision::FORWARD)
+        return -1;
+    uint8_t ours = nodeDB->getLastByteOfNodeNum(getNodeNum());
+    if (!injector && p->next_hop != ours && p->next_hop != NO_NEXT_HOP_PREFERENCE) {
+        // Listed, but the copy we heard is aimed at another hop (e.g. we are route[1] and heard the origin).
+        LOG_DEBUG("koldnet KROUTE: 0x%08x is for next hop 0x%02x, not us; not relaying", p->id, p->next_hop);
+        return 0;
+    }
+    meshtastic_MeshPacket *tosend = packetPool.allocCopy(*p);
+    if (shouldDecrementHopLimit(p))
+        tosend->hop_limit--;
+    if (h.offRoute)
+        tosend->decoded.payload.bytes[3] |= kroute::FLAG_OFF_ROUTE; // flags byte (SPEC-0002 #interfaces)
+    LOG_INFO("koldnet KROUTE: relay 0x%08x (index %d) to next hop 0x%08x (0x%02x)%s", p->id, h.index, h.next, h.nextByte,
+             h.offRoute ? ", off route" : "");
+    NextHopRouter::send(tosend); // krouteNextHop sets the header next hop
+    return 1;
+}
+#endif

@@ -200,6 +200,7 @@ class MeshService
     /// needs to keep the packet around it makes a copy
     int handleFromRadio(const meshtastic_MeshPacket *p);
     friend class RoutingModule;
+    friend class KRouteModule; // koldnet SPEC-0002: delivers the unwrapped inner message to API clients
 };
 
 extern MeshService *service;

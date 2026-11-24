@@ -3,6 +3,7 @@
 #include "FloodingRouter.h"
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 /**
  * An identifier for a globally unique message - a pair of the sending nodenum and the packet id assigned
@@ -152,4 +153,10 @@ class NextHopRouter : public FloodingRouter
     /** Check if we should be rebroadcasting this packet if so, do so.
      *  @return true if we did rebroadcast */
     bool perhapsRebroadcast(const meshtastic_MeshPacket *p) override;
+
+#if !MESHTASTIC_EXCLUDE_KROUTE
+    std::optional<uint8_t> krouteNextHop(const meshtastic_MeshPacket *p);
+    int perhapsRebroadcastKRoute(const meshtastic_MeshPacket *p);
+    std::vector<meshtastic_MeshPacket *> krouteDeferred;
+#endif
 };

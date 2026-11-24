@@ -39,6 +39,9 @@
 #endif
 #include "modules/RoutingModule.h"
 #include "modules/TextMessageModule.h"
+#if !MESHTASTIC_EXCLUDE_KROUTE
+#include "modules/KRouteModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
 #endif
@@ -134,6 +137,9 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_TEXTMESSAGE
     textMessageModule = new TextMessageModule();
+#endif
+#if !MESHTASTIC_EXCLUDE_KROUTE
+    krouteModule = new KRouteModule(); // koldnet SPEC-0002
 #endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
     traceRouteModule = new TraceRouteModule();

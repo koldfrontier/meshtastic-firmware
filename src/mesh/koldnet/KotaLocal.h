@@ -102,6 +102,12 @@ class Installer
     /** FINISH asked for a reboot, and the boot slot is set. */
     bool rebootRequested() const { return reboot; }
     const Manifest &manifest() const { return m; }
+    /** The manifest as received, for a Flash that stores it (KotaSdFlash). Valid in setBoot(). */
+    const uint8_t *manifestBytes(size_t &len) const
+    {
+        len = manTotal;
+        return man;
+    }
 
   private:
     Reply onManifest(const uint8_t *b, size_t n);

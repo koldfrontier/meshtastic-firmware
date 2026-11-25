@@ -8,6 +8,7 @@
 #include "RadioLibInterface.h"
 #include "Router.h"
 #include "main.h"
+#include "KotaSdFlash.h"
 #include <Ed25519.h>
 #include <SHA256.h>
 #include <esp_ota_ops.h>
@@ -56,6 +57,7 @@ static uint8_t testKey[32];
 
 namespace
 {
+#if !KOLDNET_KOTA_SD
 class EspFlash : public kota::Flash
 {
   public:
@@ -92,8 +94,13 @@ class EspFlash : public kota::Flash
     const esp_partition_t *part = nullptr;
     esp_ota_handle_t h = 0;
 };
+#endif
 
+#if KOLDNET_KOTA_SD
+KotaSdFlash espFlash; // staged on the card, installed by the loader in ota_1
+#else
 EspFlash espFlash;
+#endif
 kota::Identity identity;
 kota::Installer *installer;
 
@@ -132,6 +139,10 @@ KotaModule::KotaModule() : MeshModule("kota"), concurrency::OSThread("kota")
     identity.keyCount = 2;
 #endif
     installer = new kota::Installer(espFlash, identity);
+#if KOLDNET_KOTA_SD
+    espFlash.attach(installer);
+    espFlash.logLoaderResult();
+#endif
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t st;

@@ -26,6 +26,12 @@
 #define KOLDNET_KOTA_TEST_FAIL_HEALTH 0
 #endif
 
+// K2a (SPEC-0003 #ota-mesh): take an install broadcast by another node over LoRa. Until INSTALL under admin
+// PKI exists (the Key phase) only test builds do: a node on the channel could make this node reboot.
+#ifndef KOLDNET_KOTA_RADIO
+#define KOLDNET_KOTA_RADIO KOLDNET_KOTA_TEST_KEY
+#endif
+
 #if defined(HELTEC_V3)
 #define KOLDNET_BOARD_ID 1
 #elif defined(TLORA_V2_1_16)
@@ -147,26 +153,47 @@ bool KotaModule::handleLocal(const meshtastic_MeshPacket &p)
         return false; // port 333 to another node goes out as a normal packet (the mesh frames are K2)
     kota::Reply r = installer->handle(p.decoded.payload.bytes, p.decoded.payload.size, millis());
     uint8_t buf[64];
+    size_t n = answer(r, buf, sizeof buf);
+    if (n)
+        reply(buf, n);
+    setIntervalFromNow(0);
+    return true;
+}
+
+size_t KotaModule::answer(kota::Reply r, uint8_t *buf, size_t max)
+{
     size_t n = 0;
     if (r == kota::Reply::BLOCK) {
-        n = installer->encodeBlock(buf, sizeof buf);
+        n = installer->encodeBlock(buf, max);
     } else if (r == kota::Reply::STATUS) {
         kota::PlatformStatus ps;
         fillStatus(ps);
-        n = installer->encodeStatus(ps, buf, sizeof buf);
+        n = installer->encodeStatus(ps, buf, max);
         if (installer->state() == kota::State::FAILED)
             LOG_WARN("KOTA: install refused, error 0x%02x", installer->error());
         if (installer->state() == kota::State::DONE) {
             LOG_INFO("KOTA: image %s release %u written and set to boot", installer->manifest().version,
                      (unsigned)installer->manifest().release);
-            if (installer->rebootRequested())
-                rebootAtMs = millis() + 3000;
+            if (installer->rebootRequested() && !rebootAtMs)
+                rebootAtMs = millis() + 8000; // time for the answer to leave over LoRa
         }
     }
-    if (n)
-        reply(buf, n);
-    setIntervalFromNow(0);
-    return true;
+    return n;
+}
+
+void KotaModule::replyRadio(const uint8_t *buf, size_t len, uint8_t channel)
+{
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p)
+        return;
+    p->to = NODENUM_BROADCAST; // the channel key: a unicast would need PKI, which the sender may not have
+    p->channel = channel;
+    p->decoded.portnum = (meshtastic_PortNum)kota::PORT;
+    p->want_ack = false;
+    p->hop_limit = 0;
+    memcpy(p->decoded.payload.bytes, buf, len);
+    p->decoded.payload.size = len;
+    service->sendToMesh(p);
 }
 
 void KotaModule::reply(const uint8_t *buf, size_t len)
@@ -202,6 +229,22 @@ ProcessMessage KotaModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
     if (mp.transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA && !isFromUs(&mp))
         heardOther = true;
+#if KOLDNET_KOTA_RADIO
+    if (mp.transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA && !isFromUs(&mp) &&
+        mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+        mp.decoded.portnum == (meshtastic_PortNum)kota::PORT && isBroadcast(mp.to)) {
+        kota::Reply r =
+            installer->handleRadio(getFrom(&mp), mp.decoded.payload.bytes, mp.decoded.payload.size, millis());
+        uint8_t buf[64];
+        size_t n = answer(r, buf, sizeof buf);
+        if (n)
+            replyRadio(buf, n, mp.channel);
+        // Image frames are not for this node's clients; replies (0x50 up) are.
+        if (mp.decoded.payload.size && mp.decoded.payload.bytes[0] >= kota::L_MANIFEST &&
+            mp.decoded.payload.bytes[0] <= kota::L_QUERY)
+            return ProcessMessage::STOP;
+    }
+#endif
     return ProcessMessage::CONTINUE;
 }
 

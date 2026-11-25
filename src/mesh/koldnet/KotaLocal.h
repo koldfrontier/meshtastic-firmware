@@ -22,6 +22,7 @@ constexpr uint8_t L_BLOCK = 0x51;
 
 constexpr size_t DATA_MAX = 224;
 constexpr uint32_t SESSION_TIMEOUT_MS = 60000;
+constexpr uint32_t RADIO_TIMEOUT_MS = 600000; // a sender on a slow preset, or one that is restarted
 constexpr size_t MAX_KEYS = 2;
 
 // Local error codes, after the kota::Err values.
@@ -81,6 +82,13 @@ class Installer
 
     /** Handle one frame. The caller sends the reply it names (encodeStatus or encodeBlock). */
     Reply handle(const uint8_t *frame, size_t len, uint32_t nowMs);
+    /** As handle(), for a frame broadcast by node src over LoRa (K2a, SPEC-0003 #ota-mesh). One session
+     *  at a time, from one source: a frame from another source is ignored while a session is open. A
+     *  broadcast reaches nodes it is not for, and frames get lost, so this never answers a frame that is
+     *  out of place, skips list frames that are out of order (the sender sends the list again), keeps
+     *  the session when the same manifest is sent again (a sender that resumes), and repeats the answer
+     *  to a FINISH it has already done. */
+    Reply handleRadio(uint32_t src, const uint8_t *frame, size_t len, uint32_t nowMs);
     /** Drops a session that has been silent for SESSION_TIMEOUT_MS. */
     void tick(uint32_t nowMs);
 
@@ -101,6 +109,7 @@ class Installer
     Reply onData(const uint8_t *b, size_t n);
     Reply onFinish(const uint8_t *b, size_t n);
     Reply fail(uint8_t code);
+    bool active() const { return st == State::MANIFEST || st == State::LIST || st == State::DATA; }
     void drop();
 
     Flash &flash;
@@ -110,6 +119,7 @@ class Installer
     bool reboot = false;
     bool flashOpen = false;
     uint32_t lastMs = 0;
+    uint32_t source = 0; // who opened the session: 0 the local API, else a node number
 
     uint8_t man[MAX_MANIFEST] = {};
     size_t manTotal = 0, manGot = 0;

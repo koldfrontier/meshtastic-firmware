@@ -58,9 +58,13 @@ Reply Installer::handle(const uint8_t *f, size_t len, uint32_t nowMs)
 {
     if (!f || len < 1)
         return Reply::NONE;
-    lastMs = nowMs;
     const uint8_t *b = f + 1;
     size_t n = len - 1;
+    if (active() && source != 0 && f[0] != L_QUERY && f[0] != L_ABORT)
+        return Reply::STATUS; // a radio session is open: refuse without touching it
+    lastMs = nowMs;
+    if (f[0] != L_QUERY)
+        source = 0;
     switch (f[0]) {
     case L_MANIFEST:
         return onManifest(b, n);
@@ -82,9 +86,74 @@ Reply Installer::handle(const uint8_t *f, size_t len, uint32_t nowMs)
     }
 }
 
+Reply Installer::handleRadio(uint32_t src, const uint8_t *f, size_t len, uint32_t nowMs)
+{
+    if (!f || len < 1 || src == 0)
+        return Reply::NONE;
+    const uint8_t *b = f + 1;
+    size_t n = len - 1;
+    if (f[0] == L_QUERY)
+        return Reply::STATUS;
+    if (f[0] < L_MANIFEST || f[0] > L_ABORT)
+        return Reply::NONE;
+    if (active() && source != src)
+        return Reply::NONE;
+
+    if (f[0] == L_MANIFEST) {
+        if (n < 5)
+            return Reply::NONE;
+        uint16_t off = rd16(b), total = rd16(b + 2);
+        size_t dn = n - 4;
+        if ((st == State::LIST || st == State::DATA) && total == manTotal && off + dn <= manTotal &&
+            memcmp(man + off, b + 4, dn) == 0) { // the same manifest again: keep the session
+            lastMs = nowMs;
+            return off + dn == manTotal ? Reply::STATUS : Reply::NONE;
+        }
+        if (off != 0 && (st != State::MANIFEST || total != manTotal || off != manGot))
+            return Reply::NONE;
+        source = src;
+        lastMs = nowMs;
+        Reply r = onManifest(b, n);
+        if (st == State::FAILED && (err == (uint8_t)Err::BOARD || err == (uint8_t)Err::ENV))
+            return Reply::NONE; // a broadcast for another kind of board; QUERY shows the error
+        return r;
+    }
+    if (!(active() || (st == State::DONE && source == src)))
+        return Reply::NONE;
+    lastMs = nowMs;
+    switch (f[0]) {
+    case L_LIST: {
+        if (n < 5 || st == State::MANIFEST || st == State::DONE)
+            return Reply::NONE;
+        uint32_t off = rd32(b);
+        size_t dn = n - 4;
+        if (st == State::DATA) // already complete: answer the last frame again
+            return off + dn == listLen ? Reply::STATUS : Reply::NONE;
+        if (off != listGot)
+            return Reply::NONE;
+        return onList(b, n);
+    }
+    case L_DATA:
+        return onData(b, n);
+    case L_FINISH:
+        if (st == State::DONE || st != State::DATA || next != blockCount(m.rawSize))
+            return Reply::STATUS;
+        return onFinish(b, n);
+    case L_ABORT:
+        if (st == State::DONE)
+            return Reply::NONE;
+        drop();
+        st = State::IDLE;
+        err = 0;
+        return Reply::STATUS;
+    default:
+        return Reply::NONE;
+    }
+}
+
 void Installer::tick(uint32_t nowMs)
 {
-    if ((st == State::MANIFEST || st == State::LIST || st == State::DATA) && nowMs - lastMs > SESSION_TIMEOUT_MS)
+    if (active() && nowMs - lastMs > (source ? RADIO_TIMEOUT_MS : SESSION_TIMEOUT_MS))
         fail((uint8_t)LErr::TIMEOUT);
 }
 
@@ -174,8 +243,8 @@ Reply Installer::onData(const uint8_t *b, size_t n)
     const uint8_t *data = b + 4;
     size_t dn = n - 4;
     if (idx < next) { // a resend of a block already written: acknowledge it again, write nothing
-        if (off != 0)
-            return Reply::NONE;
+        if (off + dn != blockLength(m.rawSize, idx)) // once, after its last frame (a half-duplex radio must not
+            return Reply::NONE;                      // talk over the frames that follow)
         replyBlock = idx;
         replyResult = 0;
         return Reply::BLOCK;

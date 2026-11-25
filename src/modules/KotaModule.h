@@ -27,6 +27,8 @@ class KotaModule : public MeshModule, private concurrency::OSThread
 
   private:
     void reply(const uint8_t *buf, size_t len);
+    size_t answer(kota::Reply r, uint8_t *buf, size_t max);
+    void replyRadio(const uint8_t *buf, size_t len, uint8_t channel);
     void fillStatus(kota::PlatformStatus &ps);
     bool heardOther = false;
     uint8_t health = 0; // 0 not needed, 1 waiting, 2 passed

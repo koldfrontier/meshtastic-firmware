@@ -218,7 +218,10 @@ struct Rig {
         ins = new Installer(flash, id);
     }
     ~Rig() { delete ins; }
-    Reply send(const uint8_t *f, size_t n) { return ins->handle(f, n, now++); }
+    Reply send(const uint8_t *f, size_t n)
+    {
+        return radioSrc ? ins->handleRadio(radioSrc, f, n, now++) : ins->handle(f, n, now++);
+    }
     Reply manifest(const uint8_t *man, size_t len)
     {
         uint8_t f[233];
@@ -274,6 +277,7 @@ struct Rig {
         }
         return r;
     }
+    uint32_t radioSrc = 0; // not 0: send() goes in as a frame broadcast by that node (K2a)
     uint8_t lastBlockResult()
     {
         uint8_t b[8];
@@ -397,6 +401,83 @@ static void test_local_lost_frame_and_duplicate_block()
     TEST_ASSERT_EQUAL_UINT32(1, r.ins->nextBlock());
 }
 
+// K2a: the same frames broadcast over LoRa, with losses, bystanders and a second sender.
+static void test_radio_install_with_losses()
+{
+    Rig r;
+    r.radioSrc = 0x1b9dc120;
+    r.toData();
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.manifest(GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST));
+    ASSERT_STATE(r, State::DATA); // the same manifest keeps the session
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.blockList(GOLDEN_RAW_BLOCKS, sizeof GOLDEN_RAW_BLOCKS));
+    ASSERT_STATE(r, State::DATA); // a list resent after it is complete is answered, not an error
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.block(0, GOLDEN_RAW, 3)); // a lost frame
+    TEST_ASSERT_EQUAL_INT((int)Reply::BLOCK, (int)r.block(0, GOLDEN_RAW));
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.finish()); // early: refused, the session goes on
+    ASSERT_STATE(r, State::DATA);
+    TEST_ASSERT_EQUAL_INT((int)Reply::BLOCK, (int)r.block(1, GOLDEN_RAW + BLOCK));
+    TEST_ASSERT_EQUAL_INT((int)Reply::BLOCK, (int)r.block(0, GOLDEN_RAW)); // resent for another node
+    TEST_ASSERT_EQUAL_INT((int)Reply::BLOCK, (int)r.block(2, GOLDEN_RAW + 2 * BLOCK));
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.finish());
+    ASSERT_STATE(r, State::DONE);
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.finish()); // its answer was lost: asked again
+    ASSERT_STATE(r, State::DONE);
+    TEST_ASSERT_TRUE(r.flash.booted && r.ins->rebootRequested());
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, r.flash.mem, GOLDEN_RAW_SIZE);
+}
+
+static void test_radio_duplicate_block_is_acked_once()
+{
+    Rig r;
+    r.radioSrc = 7;
+    r.toData();
+    r.block(0, GOLDEN_RAW);
+    uint8_t f[5 + DATA_MAX] = {L_DATA, 0, 0, 0, 0};
+    memcpy(f + 5, GOLDEN_RAW, DATA_MAX);
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.send(f, sizeof f)); // not while the rest is on the air
+}
+
+static void test_radio_list_out_of_order_and_stray_frames_are_silent()
+{
+    Rig r;
+    r.radioSrc = 7;
+    uint8_t l[5 + 32] = {L_LIST, 0, 0, 0, 0};
+    memcpy(l + 5, GOLDEN_RAW_BLOCKS, 32);
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.send(l, sizeof l)); // no session here
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.finish());
+    ASSERT_STATE(r, State::IDLE);
+    r.manifest(GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST);
+    l[1] = 32; // the first list frame was lost
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.send(l, sizeof l));
+    ASSERT_STATE(r, State::LIST);
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.blockList(GOLDEN_RAW_BLOCKS, sizeof GOLDEN_RAW_BLOCKS));
+    ASSERT_STATE(r, State::DATA);
+}
+
+static void test_radio_one_session_one_source()
+{
+    Rig r;
+    r.radioSrc = 7;
+    r.toData();
+    r.radioSrc = 8; // another sender
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.manifest(GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST));
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)r.block(0, GOLDEN_RAW));
+    r.radioSrc = 0; // a local client
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.block(0, GOLDEN_RAW));
+    ASSERT_STATE(r, State::DATA);
+    TEST_ASSERT_EQUAL_UINT32(0, r.flash.written);
+    r.ins->tick(r.now + SESSION_TIMEOUT_MS + 10);
+    ASSERT_STATE(r, State::DATA);
+    r.ins->tick(r.now + RADIO_TIMEOUT_MS + 10);
+    ASSERT_STATE(r, State::FAILED);
+
+    Rig q;
+    q.toData(); // a local session
+    q.radioSrc = 7;
+    TEST_ASSERT_EQUAL_INT((int)Reply::NONE, (int)q.manifest(GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST));
+    ASSERT_STATE(q, State::DATA);
+}
+
 static void test_local_early_finish_timeout_and_restart()
 {
     {
@@ -466,6 +547,10 @@ void setup()
     RUN_TEST(test_local_bad_block_is_not_written_and_can_be_resent);
     RUN_TEST(test_local_lost_frame_and_duplicate_block);
     RUN_TEST(test_local_early_finish_timeout_and_restart);
+    RUN_TEST(test_radio_install_with_losses);
+    RUN_TEST(test_radio_duplicate_block_is_acked_once);
+    RUN_TEST(test_radio_list_out_of_order_and_stray_frames_are_silent);
+    RUN_TEST(test_radio_one_session_one_source);
     RUN_TEST(test_local_ignores_mesh_types_and_stray_data);
     exit(UNITY_END());
 }

@@ -41,6 +41,7 @@
 #include "modules/TextMessageModule.h"
 #if !MESHTASTIC_EXCLUDE_KROUTE
 #include "modules/KRouteModule.h"
+#include "modules/KotaModule.h"
 #endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
@@ -140,6 +141,9 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_KROUTE
     krouteModule = new KRouteModule(); // koldnet SPEC-0002
+#endif
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_KOTA
+    kotaModule = new KotaModule(); // koldnet SPEC-0003 #ota-local
 #endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
     traceRouteModule = new TraceRouteModule();

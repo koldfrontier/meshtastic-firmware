@@ -138,6 +138,12 @@ void ObjectHash::update(const uint8_t *data, size_t len)
     n += (uint32_t)len;
 }
 
+void ObjectHash::reset()
+{
+    h.reset();
+    n = 0;
+}
+
 Err ObjectHash::finish(const uint8_t expectedSha[HASH], uint32_t expectedSize)
 {
     uint8_t out[HASH];

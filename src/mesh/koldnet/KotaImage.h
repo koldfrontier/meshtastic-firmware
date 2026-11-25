@@ -84,6 +84,7 @@ class ObjectHash
   public:
     void update(const uint8_t *data, size_t len);
     Err finish(const uint8_t expectedSha[HASH], uint32_t expectedSize);
+    void reset();
 
   private:
     SHA256 h;

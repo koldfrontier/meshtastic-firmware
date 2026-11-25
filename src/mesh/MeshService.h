@@ -201,6 +201,7 @@ class MeshService
     int handleFromRadio(const meshtastic_MeshPacket *p);
     friend class RoutingModule;
     friend class KRouteModule; // koldnet SPEC-0002: delivers the unwrapped inner message to API clients
+    friend class KotaModule;   // koldnet SPEC-0003 #ota-local: STATUS and BLOCK replies to the local clients
 };
 
 extern MeshService *service;

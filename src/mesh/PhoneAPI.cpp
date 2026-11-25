@@ -10,6 +10,7 @@
 #include "NodeDB.h"
 #include "PacketHistory.h"
 #include "PhoneAPI.h"
+#include "modules/KotaModule.h" // koldnet SPEC-0003
 #include "PowerFSM.h"
 #include "RadioInterface.h"
 #include "Router.h"
@@ -814,6 +815,12 @@ bool PhoneAPI::wasSeenRecently(uint32_t id)
  */
 bool PhoneAPI::handleToRadioPacket(meshtastic_MeshPacket &p)
 {
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_KOTA
+    // koldnet SPEC-0003 #ota-local: KOTA local frames go straight to the installer, in order and before
+    // the router, whose 4-packet local queue would drop most of a block's frames.
+    if (kotaModule && kotaModule->handleLocal(p))
+        return true;
+#endif
     printPacket("PACKET FROM PHONE", &p);
 
 #if defined(ARCH_PORTDUINO)

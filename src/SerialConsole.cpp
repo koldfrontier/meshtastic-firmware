@@ -92,7 +92,14 @@ int32_t SerialConsole::runOnce()
 #if defined(SERIAL_HAS_ON_RECEIVE) || defined(CONFIG_IDF_TARGET_ESP32S2)
     return Port.available() ? delay : INT32_MAX;
 #elif defined(IS_USB_SERIAL)
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+    // koldnet (TASK-20261124-12): with TinyUSB, HWCDC::isPlugged() describes the unused hardware
+    // USB-JTAG controller and is false, so the console answered every 20 s (TASK-20261122-03 "slow first
+    // answer"). Serial is a USBCDC here, and its bool is "host connected".
+    return (bool)Port ? delay : (1000 * 20);
+#else
     return HWCDC::isPlugged() ? delay : (1000 * 20);
+#endif
 #else
     return delay;
 #endif

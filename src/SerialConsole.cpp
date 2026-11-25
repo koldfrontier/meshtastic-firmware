@@ -12,6 +12,9 @@
 #undef SERIAL_HAS_ON_RECEIVE
 #endif
 #include "HWCDC.h"
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+#include "tusb.h" // koldnet: tud_cdc_n_connected, see runOnce
+#endif
 #endif
 
 #ifdef RP2040_SLOW_CLOCK
@@ -95,8 +98,9 @@ int32_t SerialConsole::runOnce()
 #if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
     // koldnet (TASK-20261124-12): with TinyUSB, HWCDC::isPlugged() describes the unused hardware
     // USB-JTAG controller and is false, so the console answered every 20 s (TASK-20261122-03 "slow first
-    // answer"). Serial is a USBCDC here, and its bool is "host connected".
-    return (bool)Port ? delay : (1000 * 20);
+    // answer"). USBCDC's own bool follows a DTR/RTS state machine and can stay false in an open session, so
+    // ask TinyUSB itself (DTR).
+    return tud_cdc_n_connected(0) ? delay : (1000 * 20);
 #else
     return HWCDC::isPlugged() ? delay : (1000 * 20);
 #endif

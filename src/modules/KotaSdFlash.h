@@ -30,6 +30,7 @@ class KotaSdFlash : public kota::Flash
   private:
     bool mount();
     void unmount();
+    bool beginFailed(uint8_t step);
     static const esp_partition_t *app0();
     static const esp_partition_t *loader();
     static bool loaderPresent(const esp_partition_t *p);

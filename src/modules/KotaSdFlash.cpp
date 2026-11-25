@@ -66,9 +66,10 @@ bool KotaSdFlash::mount()
     if (!bus)
         bus = new SPIClass(HSPI);
     bus->begin(KOLDNET_SD_SCK, KOLDNET_SD_MISO, KOLDNET_SD_MOSI, KOLDNET_SD_CS);
-    uint32_t before = ESP.getFreeHeap();
-    if (!SD.begin(KOLDNET_SD_CS, *bus, KOLDNET_SD_HZ)) {
-        LOG_ERROR("KOTA: no SD card");
+    uint32_t before = ESP.getFreeHeap(), largest = ESP.getMaxAllocHeap();
+    // Each open file costs a 4 KB sector buffer, in one block for all of them: ask for the two we use.
+    if (!SD.begin(KOLDNET_SD_CS, *bus, KOLDNET_SD_HZ, "/sd", 2)) {
+        LOG_ERROR("KOTA: SD card does not mount; free heap %u, largest %u", (unsigned)before, (unsigned)largest);
         bus->end();
         return false;
     }
@@ -100,26 +101,33 @@ uint32_t KotaSdFlash::spareSize()
     return a->size;
 }
 
+bool KotaSdFlash::beginFailed(uint8_t step)
+{
+    LOG_ERROR("KOTA: staging could not start, step %u", (unsigned)step);
+    unmount();
+    kota::LoaderRec r; // a serial API client hides the log, so the step is kept for the next boot's log
+    if (!loadRec(r))
+        r = kota::LoaderRec();
+    r.detail = 0xB0 + step;
+    storeRec(r);
+    return false;
+}
+
 bool KotaSdFlash::begin(uint32_t size)
 {
     if (!mount())
-        return false;
-    if (!SD.exists(DIR) && !SD.mkdir(DIR)) {
-        unmount();
-        return false;
-    }
+        return beginFailed(1);
+    if (!SD.exists(DIR) && !SD.mkdir(DIR))
+        return beginFailed(2);
     SD.remove(MANIFEST);
     SD.remove(IMAGE);
     if (SD.totalBytes() - SD.usedBytes() < 2ull * size + 65536) { // the image, and the loader's copy of the running one
         LOG_ERROR("KOTA: SD card full");
-        unmount();
-        return false;
+        return beginFailed(3);
     }
     f = SD.open(IMAGE, FILE_WRITE);
-    if (!f) {
-        unmount();
-        return false;
-    }
+    if (!f)
+        return beginFailed(4);
     want = size;
     got = 0;
     mbedtls_sha256_init(&sha);
@@ -247,6 +255,8 @@ void KotaSdFlash::logLoaderResult()
     if (loadRec(r))
         LOG_INFO("KOTA: loader phase %u result %u detail 0x%02x, previous image %u bytes", (unsigned)r.phase,
                  (unsigned)r.result, (unsigned)r.detail, (unsigned)r.prevLen);
+    if (mount()) // the card report, SPEC-0003 K4a
+        unmount();
 }
 
 #endif

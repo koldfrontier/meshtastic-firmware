@@ -255,8 +255,8 @@ void KotaSdFlash::logLoaderResult()
     if (loadRec(r))
         LOG_INFO("KOTA: loader phase %u result %u detail 0x%02x, previous image %u bytes", (unsigned)r.phase,
                  (unsigned)r.result, (unsigned)r.detail, (unsigned)r.prevLen);
-    if (mount()) // the card report, SPEC-0003 K4a
-        unmount();
+    // No mount at boot: once the card has been initialised it holds GPIO2 (its DAT0) high until it loses power,
+    // and the ROM then refuses USB download mode (TASK-20261125-02, 11:02). The card is mounted only to stage.
 }
 
 #endif

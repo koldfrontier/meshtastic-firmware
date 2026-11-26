@@ -10,8 +10,12 @@
 #include "vectors.h"
 #include <Ed25519.h>
 #include <SHA256.h>
+#include <map>
+#include <set>
 #include <string.h>
+#include <string>
 #include <unity.h>
+#include <vector>
 
 using namespace kota;
 
@@ -863,6 +867,155 @@ struct MemStorage : public Storage {
     }
 };
 
+/** A card that takes writes (U_FILE). makeDir needs the parent, as SD.mkdir does. */
+struct RwStorage : public Storage {
+    std::map<std::string, std::vector<uint8_t>> files;
+    std::set<std::string> dirs{"/"};
+    bool full = false; // append fails
+    static std::string parent(const std::string &p)
+    {
+        size_t k = p.rfind('/');
+        return k == 0 ? "/" : p.substr(0, k);
+    }
+    size_t listDirs(const char *path, char (*names)[LIB_NAME], size_t max) override
+    {
+        size_t n = 0;
+        for (const std::string &d : dirs)
+            if (n < max && d != "/" && parent(d) == path) {
+                strncpy(names[n], d.c_str() + strlen(path) + 1, LIB_NAME - 1);
+                names[n++][LIB_NAME - 1] = 0;
+            }
+        return n;
+    }
+    int32_t size(const char *p) override
+    {
+        auto it = files.find(p);
+        return it == files.end() ? -1 : (int32_t)it->second.size();
+    }
+    bool read(const char *p, uint32_t off, uint8_t *buf, size_t n) override
+    {
+        auto it = files.find(p);
+        if (it == files.end() || off + n > it->second.size())
+            return false;
+        memcpy(buf, it->second.data() + off, n);
+        return true;
+    }
+    bool makeDir(const char *p) override
+    {
+        if (!dirs.count(parent(p)))
+            return false;
+        dirs.insert(p);
+        return true;
+    }
+    bool truncate(const char *p) override
+    {
+        if (!dirs.count(parent(p)))
+            return false;
+        files[p].clear();
+        return true;
+    }
+    bool append(const char *p, const uint8_t *b, size_t n) override
+    {
+        auto it = files.find(p);
+        if (full || it == files.end())
+            return false;
+        it->second.insert(it->second.end(), b, b + n);
+        return true;
+    }
+};
+
+/** One U_FILE frame without its 0x67. */
+static size_t fileFrame(uint8_t *o, const char *dir, uint8_t file, uint32_t off, const uint8_t *d, size_t n)
+{
+    size_t dl = strlen(dir), k = 0;
+    o[k++] = (uint8_t)dl;
+    memcpy(o + k, dir, dl);
+    k += dl;
+    o[k++] = file;
+    for (int i = 0; i < 4; i++)
+        o[k++] = (uint8_t)(off >> (8 * i));
+    memcpy(o + k, d, n);
+    return k + n;
+}
+
+static uint32_t upload(RwStorage &card, const char *dir, uint8_t file, const uint8_t *d, uint32_t len)
+{
+    uint8_t f[240];
+    uint32_t size = 0;
+    for (uint32_t off = 0; off < len; off += 200) {
+        uint32_t c = len - off < 200 ? len - off : 200;
+        TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, file, off, d + off, c), size));
+        TEST_ASSERT_EQUAL_UINT32(off + c, size);
+    }
+    return size;
+}
+
+static void test_file_frames_write_an_image_the_library_verifies()
+{
+    RwStorage card;
+    upload(card, "heltec-v3-r5", 0, GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST);
+    upload(card, "heltec-v3-r5", 1, GOLDEN_RAW_BLOCKS, sizeof GOLDEN_RAW_BLOCKS);
+    TEST_ASSERT_EQUAL_UINT32(GOLDEN_RAW_SIZE, upload(card, "heltec-v3-r5", 2, GOLDEN_RAW, GOLDEN_RAW_SIZE));
+    TEST_ASSERT_TRUE(card.dirs.count("/koldnet/lib/heltec-v3-r5"));
+    Library lib;
+    const uint8_t *keys[1] = {PUB};
+    TEST_ASSERT_EQUAL_UINT(1, lib.scan(card, keys, 1));
+    TEST_ASSERT_EQUAL_UINT8(0, lib.entry(0).err);
+    TEST_ASSERT_EQUAL_STRING("heltec-v3-r5", lib.entry(0).name);
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, card.files["/koldnet/lib/heltec-v3-r5/raw.bin"].data(), GOLDEN_RAW_SIZE);
+}
+
+static void test_file_frames_append_only_at_the_size()
+{
+    RwStorage card;
+    uint8_t f[240];
+    uint32_t size = 0;
+    const char *dir = "tlora-r6";
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, 2, 0, GOLDEN_RAW, 200), size));
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, 2, 200, GOLDEN_RAW + 200, 200), size));
+    // the same frame again (its reply was lost): not written, the size says where to go on
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::OFFSET, putFile(card, f, fileFrame(f, dir, 2, 200, GOLDEN_RAW + 200, 200), size));
+    TEST_ASSERT_EQUAL_UINT32(400, size);
+    // a gap: not written
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::OFFSET, putFile(card, f, fileFrame(f, dir, 2, 600, GOLDEN_RAW, 200), size));
+    TEST_ASSERT_EQUAL_UINT32(400, size);
+    // no bytes: the size only
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, 2, 0, nullptr, 0), size));
+    TEST_ASSERT_EQUAL_UINT32(400, size);
+    TEST_ASSERT_EQUAL_UINT32(400, card.files["/koldnet/lib/tlora-r6/raw.bin"].size());
+    // offset 0 starts the file again
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, 2, 0, GOLDEN_RAW, 50), size));
+    TEST_ASSERT_EQUAL_UINT32(50, size);
+    TEST_ASSERT_EQUAL_UINT32(50, card.files["/koldnet/lib/tlora-r6/raw.bin"].size());
+    // the size of a file that is not there
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, dir, 0, 0, nullptr, 0), size));
+    TEST_ASSERT_EQUAL_UINT32(0, size);
+    // a write the card refuses
+    card.full = true;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::WRITE, putFile(card, f, fileFrame(f, dir, 2, 50, GOLDEN_RAW, 10), size));
+}
+
+static void test_file_frames_refuse_names_outside_the_library()
+{
+    RwStorage card;
+    uint8_t f[240], d[4] = {1, 2, 3, 4};
+    uint32_t size = 7;
+    const char *bad[] = {"..", ".", "a/b", "a\\b", "x y", "../lib", "1234567890123456789012345678901234567890"};
+    for (const char *b : bad)
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, fileFrame(f, b, 0, 0, d, 4), size));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, fileFrame(f, "", 0, 0, d, 4), size));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, fileFrame(f, "ok", 3, 0, d, 4), size));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, fileFrame(f, "ok", 2, FILE_MAX - 2, d, 4), size));
+    size_t n = fileFrame(f, "ok", 2, 0, d, 0);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, n - 1, size)); // short offset
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::BAD_FRAME, putFile(card, f, 0, size));
+    TEST_ASSERT_EQUAL_UINT32(0, size);
+    TEST_ASSERT_EQUAL_UINT(0, card.files.size());
+    TEST_ASSERT_EQUAL_UINT(1, card.dirs.size());
+    // 39 characters is the longest name
+    TEST_ASSERT_EQUAL_UINT8(0, putFile(card, f, fileFrame(f, "123456789012345678901234567890123456789", 0, 0, d, 4), size));
+}
+
 static void test_library_verifies_every_image_on_the_card()
 {
     static uint8_t badSig[sizeof GOLDEN_MANIFEST];
@@ -1034,6 +1187,9 @@ void setup()
     RUN_TEST(test_library_fits_board_env_and_release);
     RUN_TEST(test_progress_frame);
     RUN_TEST(test_own_image_is_uploaded_checked_and_sent);
+    RUN_TEST(test_file_frames_write_an_image_the_library_verifies);
+    RUN_TEST(test_file_frames_append_only_at_the_size);
+    RUN_TEST(test_file_frames_refuse_names_outside_the_library);
     exit(UNITY_END());
 }
 

@@ -25,12 +25,23 @@ constexpr uint8_t U_CANCEL = 0x64;   // []
 constexpr uint8_t U_HEARD = 0x65;    // []: one U_NODE a node heard, without a new scan
 constexpr uint8_t U_SELF = 0x66;     // [part u8: 0 manifest, 1 block list][offset u32][bytes]: this node's own image
 constexpr uint8_t IMAGE_SELF = 0xFF; // U_PUSH image number of the own image
+constexpr uint8_t U_FILE = 0x67;     // [dir len u8][dir][file u8][offset u32][bytes]: write a library file
 constexpr uint8_t U_NODE = 0x70;     // [i u8][count u8][node u32][rssi i16][snr*4 i16][age s u16][STATUS bytes]
 constexpr uint8_t U_LIBENT = 0x71;   // see encodeLibEntry
 constexpr uint8_t U_PROG = 0x72;     // see Sender::encodeProgress
-constexpr uint8_t U_ACK = 0x73;      // [command u8][result u8]: 0 accepted, else UErr
+constexpr uint8_t U_ACK = 0x73;      // [command u8][result u8][extra u8]; U_FILE adds [size u32]
 
-enum class UErr : uint8_t { OK = 0, BUSY = 1, BAD_FRAME = 2, NO_IMAGE = 3, NO_TARGET = 4, NO_STORAGE = 5, OFF = 6 };
+enum class UErr : uint8_t {
+    OK = 0,
+    BUSY = 1,
+    BAD_FRAME = 2,
+    NO_IMAGE = 3,
+    NO_TARGET = 4,
+    NO_STORAGE = 5,
+    OFF = 6,
+    WRITE = 7,  // the card refused a write
+    OFFSET = 8, // U_FILE: not at the file's size; continue from the size in the reply
+};
 
 /** The image on storage, as scripts/kota.py writes it: manifest.bin, raw.blocks, raw.bin. */
 class ImageSource
@@ -194,7 +205,33 @@ class Storage
     /** The file's size, or -1. */
     virtual int32_t size(const char *path) = 0;
     virtual bool read(const char *path, uint32_t off, uint8_t *buf, size_t n) = 0;
+    /** Writing, for U_FILE. makeDir succeeds when the directory is there already. */
+    virtual bool makeDir(const char *path)
+    {
+        (void)path;
+        return false;
+    }
+    /** Start the file empty. */
+    virtual bool truncate(const char *path)
+    {
+        (void)path;
+        return false;
+    }
+    virtual bool append(const char *path, const uint8_t *b, size_t n)
+    {
+        (void)path;
+        (void)b;
+        (void)n;
+        return false;
+    }
 };
+
+constexpr uint32_t FILE_MAX = 0x400000; // no library file is larger (an app slot is at most 3 MB)
+
+/** One U_FILE frame, without its 0x67 (SPEC-0003 #ota-updater-rules, "Loading the library over the local
+ *  API"): writes /koldnet/lib/<dir>/<file> when the offset is the file's size, or starts it again at offset 0.
+ *  Returns a UErr; size is the file's size afterwards (0 when the frame was malformed). */
+uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size);
 
 constexpr uint8_t LIB_NO_MANIFEST = 0x60;
 constexpr uint8_t LIB_RAW_SIZE = 0x61;

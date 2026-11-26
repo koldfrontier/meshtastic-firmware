@@ -141,6 +141,7 @@ class SdStorage : public kota::Storage
     {
         UPD_LOCK();
         closeCur();
+        closeW();
         File d = SD.open(path);
         if (!d || !d.isDirectory())
             return 0;
@@ -169,6 +170,8 @@ class SdStorage : public kota::Storage
     int32_t size(const char *path) override
     {
         UPD_LOCK();
+        if (w && !strcmp(wPath, path))
+            return (int32_t)wSize; // written, maybe not yet in the directory entry
         File f = SD.open(path);
         if (!f)
             return -1;
@@ -179,6 +182,8 @@ class SdStorage : public kota::Storage
     bool read(const char *path, uint32_t off, uint8_t *buf, size_t n) override
     {
         UPD_LOCK();
+        if (w && !strcmp(wPath, path))
+            closeW();
         if (!cur || strcmp(curPath, path) != 0) {
             closeCur();
             cur = SD.open(path);
@@ -191,6 +196,46 @@ class SdStorage : public kota::Storage
         return cur.read(buf, n) == (int)n;
     }
 
+    bool makeDir(const char *path) override
+    {
+        UPD_LOCK();
+        return SD.exists(path) || SD.mkdir(path);
+    }
+    bool truncate(const char *path) override
+    {
+        UPD_LOCK();
+        closeCur();
+        closeW();
+        File f = SD.open(path, FILE_WRITE); // "w": empty
+        if (!f)
+            return false;
+        f.close();
+        return true;
+    }
+    bool append(const char *path, const uint8_t *b, size_t n) override
+    {
+        UPD_LOCK();
+        if (!strcmp(curPath, path))
+            closeCur();
+        if (!w || strcmp(wPath, path) != 0) {
+            closeW();
+            w = SD.open(path, FILE_APPEND);
+            if (!w)
+                return false;
+            strncpy(wPath, path, sizeof wPath - 1);
+            wSize = (uint32_t)w.size();
+        }
+        if (w.write(b, n) != n) {
+            closeW();
+            return false;
+        }
+        uint32_t before = wSize;
+        wSize += (uint32_t)n;
+        if ((before ^ wSize) & ~(uint32_t)0x7FFF)
+            w.flush(); // every 32 KB, so a reset loses at most that much; the client continues from the size
+        return true;
+    }
+
   private:
     void closeCur()
     {
@@ -198,8 +243,17 @@ class SdStorage : public kota::Storage
             cur.close();
         curPath[0] = 0;
     }
-    File cur;
+    void closeW()
+    {
+        if (w)
+            w.close();
+        wPath[0] = 0;
+        wSize = 0;
+    }
+    File cur, w;
     char curPath[kota::LIB_NAME + 32] = {};
+    char wPath[kota::LIB_NAME + 32] = {};
+    uint32_t wSize = 0;
 };
 
 class UpdaterRadio : public kota::RadioOut
@@ -521,6 +575,23 @@ void KotaModule::handleUpdater(const uint8_t *b, size_t n)
         ack(cmd, r, self->complete() ? 1 : 0); // result: 0 taken, else the error; extra: 1 when complete
         if (self->complete() && r == 0)
             LOG_INFO("KOTA updater: own image %s r%u ready to send", self->mf().version, (unsigned)self->mf().release);
+        break;
+    }
+    case kota::U_FILE: {
+        // [dir len][dir][file u8][offset u32][bytes] (SPEC-0003 #ota-updater-rules); reply [0x73][0x67][result][0][size u32]
+        uint32_t size = 0;
+        uint8_t r;
+        if (sender->busy())
+            r = (uint8_t)kota::UErr::BUSY;
+        else if (!storage.ready())
+            r = (uint8_t)kota::UErr::NO_STORAGE;
+        else
+            r = kota::putFile(storage, b + 1, n - 1, size);
+        uint8_t o[8] = {kota::U_ACK, cmd, r, 0, (uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16),
+                        (uint8_t)(size >> 24)};
+        reply(o, sizeof o);
+        if (r && r != (uint8_t)kota::UErr::OFFSET)
+            LOG_WARN("KOTA updater: file frame refused, %u", r);
         break;
     }
     case kota::U_PUSH: {

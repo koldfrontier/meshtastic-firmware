@@ -624,6 +624,59 @@ bool LibSource::readRaw(uint32_t off, uint8_t *out, size_t n)
     return s.read(raw, off, out, n);
 }
 
+static bool goodName(const uint8_t *d, size_t n)
+{
+    if (n < 1 || n >= LIB_NAME || (n == 1 && d[0] == '.') || (n == 2 && d[0] == '.' && d[1] == '.'))
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t ch = d[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+              ch == '-'))
+            return false;
+    }
+    return true;
+}
+
+uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size)
+{
+    static const char *const FILES[3] = {"manifest.bin", "raw.blocks", "raw.bin"};
+    size = 0;
+    if (n < 1)
+        return (uint8_t)UErr::BAD_FRAME;
+    size_t dl = b[0];
+    if (n < 1 + dl + 1 + 4 || !goodName(b + 1, dl) || b[1 + dl] > 2)
+        return (uint8_t)UErr::BAD_FRAME;
+    char dir[LIB_NAME];
+    memcpy(dir, b + 1, dl);
+    dir[dl] = 0;
+    uint8_t file = b[1 + dl];
+    uint32_t off = rd32(b + 2 + dl);
+    const uint8_t *data = b + 6 + dl;
+    size_t len = n - 6 - dl;
+    char p[LIB_NAME + 32];
+    path(p, sizeof p, dir, FILES[file]);
+    int32_t have = s.size(p);
+    uint32_t cur = have > 0 ? (uint32_t)have : 0;
+    size = cur;
+    if (len == 0)
+        return (uint8_t)UErr::OK; // only the size
+    if (off > FILE_MAX || len > FILE_MAX - off)
+        return (uint8_t)UErr::BAD_FRAME;
+    if (off == 0) {
+        char d[LIB_NAME + 32];
+        snprintf(d, sizeof d, "%s/%s", Library::ROOT, dir);
+        if (!s.makeDir("/koldnet") || !s.makeDir(Library::ROOT) || !s.makeDir(d) || !s.truncate(p))
+            return (uint8_t)UErr::WRITE;
+        size = 0;
+    } else if (off != cur) {
+        return (uint8_t)UErr::OFFSET;
+    }
+    if (!s.append(p, data, len))
+        return (uint8_t)UErr::WRITE;
+    size = off + (uint32_t)len;
+    return (uint8_t)UErr::OK;
+}
+
 uint8_t SelfSource::put(uint8_t part, uint32_t off, const uint8_t *b, size_t n, const uint8_t *const *keys,
                         size_t keyCount)
 {

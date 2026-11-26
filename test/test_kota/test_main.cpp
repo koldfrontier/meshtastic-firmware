@@ -992,7 +992,14 @@ static void test_file_frames_append_only_at_the_size()
     TEST_ASSERT_EQUAL_UINT32(0, size);
     // a write the card refuses
     card.full = true;
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::WRITE, putFile(card, f, fileFrame(f, dir, 2, 50, GOLDEN_RAW, 10), size));
+    uint8_t step = 0;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::WRITE, putFile(card, f, fileFrame(f, dir, 2, 50, GOLDEN_RAW, 10), size, &step));
+    TEST_ASSERT_EQUAL_UINT8(5, step);
+    // the step says which call failed
+    RwStorage noRoot;
+    noRoot.dirs.clear();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)UErr::WRITE, putFile(noRoot, f, fileFrame(f, dir, 2, 0, GOLDEN_RAW, 10), size, &step));
+    TEST_ASSERT_EQUAL_UINT8(1, step);
 }
 
 static void test_file_frames_refuse_names_outside_the_library()

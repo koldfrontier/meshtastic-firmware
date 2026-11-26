@@ -637,8 +637,12 @@ static bool goodName(const uint8_t *d, size_t n)
     return true;
 }
 
-uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size)
+uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size, uint8_t *step)
 {
+    uint8_t dummy;
+    if (!step)
+        step = &dummy;
+    *step = 0;
     static const char *const FILES[3] = {"manifest.bin", "raw.blocks", "raw.bin"};
     size = 0;
     if (n < 1)
@@ -665,14 +669,24 @@ uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size)
     if (off == 0) {
         char d[LIB_NAME + 32];
         snprintf(d, sizeof d, "%s/%s", Library::ROOT, dir);
-        if (!s.makeDir("/koldnet") || !s.makeDir(Library::ROOT) || !s.makeDir(d) || !s.truncate(p))
+        const char *dirs[3] = {"/koldnet", Library::ROOT, d};
+        for (uint8_t k = 0; k < 3; k++)
+            if (!s.makeDir(dirs[k])) {
+                *step = (uint8_t)(k + 1);
+                return (uint8_t)UErr::WRITE;
+            }
+        if (!s.truncate(p)) {
+            *step = 4;
             return (uint8_t)UErr::WRITE;
+        }
         size = 0;
     } else if (off != cur) {
         return (uint8_t)UErr::OFFSET;
     }
-    if (!s.append(p, data, len))
+    if (!s.append(p, data, len)) {
+        *step = 5;
         return (uint8_t)UErr::WRITE;
+    }
     size = off + (uint32_t)len;
     return (uint8_t)UErr::OK;
 }

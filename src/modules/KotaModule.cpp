@@ -12,6 +12,7 @@
 #include "mesh/koldnet/KotaSender.h"
 #if KOLDNET_UPDATER
 #include <SD.h>
+#include <errno.h>
 #include "SPILock.h"
 #include "concurrency/LockGuard.h"
 #endif
@@ -580,18 +581,27 @@ void KotaModule::handleUpdater(const uint8_t *b, size_t n)
     case kota::U_FILE: {
         // [dir len][dir][file u8][offset u32][bytes] (SPEC-0003 #ota-updater-rules); reply [0x73][0x67][result][0][size u32]
         uint32_t size = 0;
-        uint8_t r;
+        uint8_t r, step = 0;
+        int err = 0;
         if (sender->busy())
             r = (uint8_t)kota::UErr::BUSY;
         else if (!storage.ready())
             r = (uint8_t)kota::UErr::NO_STORAGE;
         else
-            r = kota::putFile(storage, b + 1, n - 1, size);
-        uint8_t o[8] = {kota::U_ACK, cmd, r, 0, (uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16),
-                        (uint8_t)(size >> 24)};
+        {
+            errno = 0;
+            r = kota::putFile(storage, b + 1, n - 1, size, &step);
+            err = errno;
+        }
+        // [0x73][0x67][result][step][size u32][errno u8]: step and errno say which card call failed on WRITE
+        uint8_t o[9] = {kota::U_ACK, cmd,
+                        r,           step,
+                        (uint8_t)size, (uint8_t)(size >> 8),
+                        (uint8_t)(size >> 16), (uint8_t)(size >> 24),
+                        (uint8_t)err};
         reply(o, sizeof o);
         if (r && r != (uint8_t)kota::UErr::OFFSET)
-            LOG_WARN("KOTA updater: file frame refused, %u", r);
+            LOG_WARN("KOTA updater: file frame refused, %u step %u errno %d", r, step, err);
         break;
     }
     case kota::U_PUSH: {

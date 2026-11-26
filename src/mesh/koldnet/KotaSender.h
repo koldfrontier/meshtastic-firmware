@@ -230,8 +230,9 @@ constexpr uint32_t FILE_MAX = 0x400000; // no library file is larger (an app slo
 
 /** One U_FILE frame, without its 0x67 (SPEC-0003 #ota-updater-rules, "Loading the library over the local
  *  API"): writes /koldnet/lib/<dir>/<file> when the offset is the file's size, or starts it again at offset 0.
- *  Returns a UErr; size is the file's size afterwards (0 when the frame was malformed). */
-uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size);
+ *  Returns a UErr; size is the file's size afterwards (0 when the frame was malformed). On WRITE, step says
+ *  which call failed: 1 to 3 makeDir /koldnet, /koldnet/lib, the image directory; 4 truncate; 5 append. */
+uint8_t putFile(Storage &s, const uint8_t *b, size_t n, uint32_t &size, uint8_t *step = nullptr);
 
 constexpr uint8_t LIB_NO_MANIFEST = 0x60;
 constexpr uint8_t LIB_RAW_SIZE = 0x61;

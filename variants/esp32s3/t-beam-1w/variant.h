@@ -25,7 +25,9 @@
 
 // SD Card
 #define HAS_SDCARD
-#define SDCARD_USE_SPI1
+// koldnet: no SDCARD_USE_SPI1. With it the card gets its own controller (HSPI) on these pins at boot, the radio
+// then starts the default controller (FSPI) on the same pins, and every later card write fails with EIO
+// (TASK-20261125-14). One bus, one controller: the card and the radio take turns under spiLock.
 #define SDCARD_CS SPI_CS
 
 // LoRa Radio - SX1262 with 1W PA

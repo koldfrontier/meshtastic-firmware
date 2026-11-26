@@ -171,8 +171,10 @@ void Sender::onReply(uint32_t from, const uint8_t *b, size_t n, int16_t rssi, in
         }
     } else if (b[0] == L_BLOCK && n >= 4) {
         Target *t = find(from);
-        if (t && ph == Phase::DATA && b[3] == 0 && rd16(b + 1) == cur)
+        if (t && ph == Phase::DATA && b[3] == 0 && rd16(b + 1) == cur) {
             t->acked = true;
+            t->next = (uint16_t)(cur + 1); // what its STATUS would say now
+        }
     }
 }
 

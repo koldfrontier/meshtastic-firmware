@@ -584,17 +584,13 @@ uint32_t KotaModule::updaterStep(uint32_t now)
     uint32_t w = sender->step(now);
     for (int k = 0; w == 0 && k < 8; k++)
         w = sender->step(now);
-    // Progress to the client when the phase changes and every 10 blocks; a client that left misses nothing.
+    // Progress goes to a client only when it asks (U_PROGRESS): frames sent with no client wait in the queue to
+    // the phone, crowd out messages, and reach the next client stale (TASK-20261125-14, 2026-11-26 00:29).
     if (sender->phase() != (kota::Phase)lastProgPhase ||
-        (sender->phase() == kota::Phase::DATA && sender->block() != lastProgBlock && sender->block() % 10 == 0)) {
-        uint8_t o[100];
-        size_t len = sender->encodeProgress(now, o, sizeof o);
-        if (len)
-            reply(o, len);
-        if (sender->phase() != (kota::Phase)lastProgPhase)
-            LOG_INFO("KOTA updater: phase %u, block %u of %u, resent %u, why %u", (unsigned)sender->phase(),
-                     (unsigned)sender->block(), (unsigned)sender->blocks(), (unsigned)sender->resent(),
-                     (unsigned)sender->why());
+        (sender->phase() == kota::Phase::DATA && sender->block() != lastProgBlock && sender->block() % 50 == 0)) {
+        LOG_INFO("KOTA updater: phase %u, block %u of %u, resent %u, why %u", (unsigned)sender->phase(),
+                 (unsigned)sender->block(), (unsigned)sender->blocks(), (unsigned)sender->resent(),
+                 (unsigned)sender->why());
         lastProgPhase = (uint8_t)sender->phase();
         lastProgBlock = sender->block();
     }

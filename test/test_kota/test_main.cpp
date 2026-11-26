@@ -672,6 +672,7 @@ static void test_sender_installs_two_targets_with_one_transmission()
     for (uint32_t i = 0; i < 3; i++)
         perImage += (blockLength(GOLDEN_RAW_SIZE, i) + DATA_MAX - 1) / DATA_MAX;
     TEST_ASSERT_EQUAL_UINT32(perImage, air.dataFrames); // acceptance 6 without loss: once for both
+    TEST_ASSERT_EQUAL_UINT16(3, s.target(1).next);
     TEST_ASSERT_EQUAL_UINT32(0, s.resent());
 }
 

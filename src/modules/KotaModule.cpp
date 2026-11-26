@@ -12,6 +12,7 @@
 #include "mesh/koldnet/KotaSender.h"
 #if KOLDNET_UPDATER
 #include <SD.h>
+#include "SPILock.h"
 #include "concurrency/LockGuard.h"
 #endif
 #include <Ed25519.h>

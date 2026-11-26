@@ -299,7 +299,10 @@ size_t Installer::encodeStatus(const PlatformStatus &ps, uint8_t *o, size_t max)
     size_t vl = strlen(ps.version);
     if (vl > MAX_STR)
         vl = MAX_STR;
-    size_t need = 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 4 + 1 + 8 + 1 + vl;
+    size_t el = id.env ? strlen(id.env) : 0;
+    if (el > MAX_STR)
+        el = MAX_STR;
+    size_t need = 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 4 + 1 + 8 + 1 + vl + 1 + el;
     if (max < need)
         return 0;
     size_t i = 0;
@@ -323,7 +326,10 @@ size_t Installer::encodeStatus(const PlatformStatus &ps, uint8_t *o, size_t max)
     i += 8;
     o[i++] = (uint8_t)vl;
     memcpy(o + i, ps.version, vl);
-    return i + vl;
+    i += vl;
+    o[i++] = (uint8_t)el; // the env, after the version (SPEC-0003 #ota-updater-rules, U1); older readers stop before it
+    memcpy(o + i, id.env, el);
+    return i + el;
 }
 
 size_t Installer::encodeBlock(uint8_t *o, size_t max) const

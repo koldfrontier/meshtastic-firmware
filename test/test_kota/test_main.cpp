@@ -5,6 +5,8 @@
 #include "configuration.h" // Arduino.h: setup() and loop() with C linkage
 #include "mesh/koldnet/KotaImage.h"
 #include "mesh/koldnet/KotaLocal.h"
+#include "mesh/koldnet/KotaSender.h"
+#include <stdio.h>
 #include "vectors.h"
 #include <Ed25519.h>
 #include <SHA256.h>
@@ -318,7 +320,9 @@ static void test_local_install_happy_path()
     ps.version = "2.7.26.abc";
     uint8_t st[64];
     size_t n = r.ins->encodeStatus(ps, st, sizeof st);
-    TEST_ASSERT_EQUAL_UINT(27 + 10, n); // 27 fixed bytes (SPEC-0003 #ota-local) and the version
+    TEST_ASSERT_EQUAL_UINT(27 + 10 + 1 + 9, n); // 27 fixed bytes (SPEC-0003 #ota-local), the version, the env (U1)
+    TEST_ASSERT_EQUAL_UINT8(9, st[37]);
+    TEST_ASSERT_EQUAL_MEMORY("heltec-v3", st + 38, 9);
     TEST_ASSERT_EQUAL_UINT8(L_STATUS, st[0]);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)State::DONE, st[1]);
     TEST_ASSERT_EQUAL_UINT8(3, st[3]); // next block
@@ -530,6 +534,424 @@ static void test_local_ignores_mesh_types_and_stray_data()
     TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.send(q, 1));
 }
 
+// ---- SPEC-0003 #ota-updater (U1): the sender on the node, the library, the codecs -------------
+
+class MemSource : public ImageSource
+{
+  public:
+    bool corrupt = false;
+    size_t manifest(uint8_t *out, size_t max) override
+    {
+        if (max < sizeof GOLDEN_MANIFEST)
+            return 0;
+        memcpy(out, GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST);
+        return sizeof GOLDEN_MANIFEST;
+    }
+    uint32_t listSize() override { return sizeof GOLDEN_RAW_BLOCKS; }
+    bool readList(uint32_t off, uint8_t *out, size_t n) override
+    {
+        if (off + n > sizeof GOLDEN_RAW_BLOCKS)
+            return false;
+        memcpy(out, GOLDEN_RAW_BLOCKS + off, n);
+        return true;
+    }
+    uint32_t rawSize() override { return GOLDEN_RAW_SIZE; }
+    bool readRaw(uint32_t off, uint8_t *out, size_t n) override
+    {
+        if (off + n > GOLDEN_RAW_SIZE)
+            return false;
+        memcpy(out, GOLDEN_RAW + off, n);
+        if (corrupt && off <= 5000 && 5000 < off + n)
+            out[5000 - off] ^= 1;
+        return true;
+    }
+};
+
+// Receivers are real Installers. A frame or a reply is lost with probability lossPermille.
+struct Air : public RadioOut {
+    static constexpr uint32_t ME = 0xA0A0A0A0;
+    struct Rx {
+        uint32_t node;
+        Rig *rig;
+        bool silent;
+        int dropStatus; // drop this many STATUS replies first
+    } rx[4];
+    size_t nrx = 0;
+    uint32_t lossPermille = 0;
+    uint32_t seed = 12345;
+    uint32_t now = 1000;
+    uint32_t frames = 0, dataFrames = 0;
+    struct Q {
+        uint32_t src;
+        uint8_t b[100];
+        size_t n;
+    } q[64];
+    size_t nq = 0;
+
+    bool lost()
+    {
+        seed = seed * 1103515245u + 12345u;
+        return ((seed >> 16) % 1000) < lossPermille;
+    }
+    void add(uint32_t node, Rig *r, bool silent = false, int dropStatus = 0)
+    {
+        rx[nrx++] = {node, r, silent, dropStatus};
+    }
+    bool ready() override { return true; }
+    uint32_t airtimeMs(size_t n) override { return 5 + (uint32_t)n / 10; }
+    bool send(const uint8_t *f, size_t n) override
+    {
+        frames++;
+        if (f[0] == L_DATA)
+            dataFrames++;
+        for (size_t i = 0; i < nrx; i++) {
+            if (rx[i].silent || lost())
+                continue;
+            Rig &r = *rx[i].rig;
+            Reply rep = r.ins->handleRadio(ME, f, n, now);
+            if (rep == Reply::NONE || lost())
+                continue;
+            if (rep == Reply::STATUS && rx[i].dropStatus > 0) {
+                rx[i].dropStatus--;
+                continue;
+            }
+            if (nq >= 64)
+                continue;
+            Q &e = q[nq++];
+            e.src = rx[i].node;
+            if (rep == Reply::BLOCK) {
+                e.n = r.ins->encodeBlock(e.b, sizeof e.b);
+            } else {
+                PlatformStatus ps;
+                ps.version = "2.7.26.test";
+                e.n = r.ins->encodeStatus(ps, e.b, sizeof e.b);
+            }
+        }
+        return true;
+    }
+    // Run the sender until it stops; replies arrive between its steps.
+    void run(Sender &s, uint32_t limitMs = 20000000)
+    {
+        uint32_t end = now + limitMs;
+        while (s.busy() && (int32_t)(now - end) < 0) {
+            uint32_t w = s.step(now);
+            for (size_t i = 0; i < nq; i++)
+                s.onReply(q[i].src, q[i].b, q[i].n, -40, 40, now);
+            nq = 0;
+            now += w ? (w < 200 ? w : 200) : 1;
+        }
+    }
+};
+
+static SenderConfig fastCfg()
+{
+    SenderConfig c;
+    c.retries = 30;
+    c.blockTimeoutMs = 500;
+    c.queryTimeoutMs = 5000;
+    return c;
+}
+
+static void test_sender_installs_two_targets_with_one_transmission()
+{
+    Rig a, b;
+    Air air;
+    air.add(1, &a);
+    air.add(2, &b);
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[2] = {1, 2};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 2, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::DONE, (int)s.phase());
+    ASSERT_STATE(a, State::DONE);
+    ASSERT_STATE(b, State::DONE);
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, a.flash.mem, GOLDEN_RAW_SIZE);
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, b.flash.mem, GOLDEN_RAW_SIZE);
+    uint32_t perImage = 0;
+    for (uint32_t i = 0; i < 3; i++)
+        perImage += (blockLength(GOLDEN_RAW_SIZE, i) + DATA_MAX - 1) / DATA_MAX;
+    TEST_ASSERT_EQUAL_UINT32(perImage, air.dataFrames); // acceptance 6 without loss: once for both
+    TEST_ASSERT_EQUAL_UINT32(0, s.resent());
+}
+
+static void test_sender_with_losses_still_installs()
+{
+    for (uint32_t seed = 1; seed <= 5; seed++) {
+        Rig a, b;
+        Air air;
+        air.seed = seed;
+        air.lossPermille = 100;
+        air.add(1, &a);
+        air.add(2, &b);
+        MemSource src;
+        Sender s(air);
+        uint32_t nodes[2] = {1, 2};
+        TEST_ASSERT_TRUE(s.push(&src, nodes, 2, fastCfg(), air.now));
+        air.run(s);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)Phase::DONE, (int)s.phase(), "10 % loss");
+        TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, a.flash.mem, GOLDEN_RAW_SIZE);
+        TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, b.flash.mem, GOLDEN_RAW_SIZE);
+    }
+}
+
+static void test_sender_asks_again_until_every_target_answered()
+{
+    Rig a, b;
+    Air air;
+    air.add(1, &a);
+    air.add(2, &b, false, 1); // the first STATUS of node 2 is lost (CF-lora-query-*.txt)
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[2] = {1, 2};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 2, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::DONE, (int)s.phase());
+}
+
+static void test_sender_silent_target_fails_with_no_answer()
+{
+    Rig a, b;
+    Air air;
+    air.add(1, &a);
+    air.add(2, &b, true);
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[2] = {1, 2};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 2, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::FAILED, (int)s.phase());
+    TEST_ASSERT_EQUAL_INT((int)Why::NO_ANSWER, (int)s.why());
+    ASSERT_STATE(a, State::IDLE); // nothing was sent to anyone
+}
+
+static void test_sender_wrong_board_target_fails_the_push()
+{
+    Rig a(2); // a LoRa32 is offered a Heltec image
+    Air air;
+    air.add(1, &a);
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 1, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::FAILED, (int)s.phase());
+    TEST_ASSERT_EQUAL_INT((int)Why::TARGET_FAILED, (int)s.why());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Err::BOARD, s.target(0).err);
+}
+
+static void test_sender_refuses_an_image_the_card_changed()
+{
+    Rig a;
+    Air air;
+    air.add(1, &a);
+    MemSource src;
+    src.corrupt = true;
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 1, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Why::IMAGE_HASH, (int)s.why());
+    TEST_ASSERT_EQUAL_UINT32(0, air.frames); // checked before anything goes on the air
+}
+
+static void test_sender_resumes_where_the_targets_are()
+{
+    Rig a;
+    a.radioSrc = Air::ME;
+    a.toData();
+    a.block(0, GOLDEN_RAW);
+    a.block(1, GOLDEN_RAW + BLOCK); // a sender that stopped after block 1
+    Air air;
+    air.add(1, &a);
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    TEST_ASSERT_TRUE(s.push(&src, nodes, 1, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::DONE, (int)s.phase());
+    TEST_ASSERT_EQUAL_UINT32((blockLength(GOLDEN_RAW_SIZE, 2) + DATA_MAX - 1) / DATA_MAX, air.dataFrames);
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, a.flash.mem, GOLDEN_RAW_SIZE);
+}
+
+static void test_scan_lists_every_node_that_answers_with_its_env()
+{
+    Rig a, b(2);
+    Air air;
+    air.add(0x1b9dc120, &a);
+    air.add(0x1c15d508, &b);
+    Sender s(air);
+    TEST_ASSERT_TRUE(s.scan(3, 1000, air.now));
+    TEST_ASSERT_FALSE(s.scan(3, 1000, air.now)); // busy
+    air.run(s);
+    TEST_ASSERT_EQUAL_UINT(2, s.heardCount());
+    const Heard &h = s.heard(0).node == 0x1b9dc120 ? s.heard(0) : s.heard(1);
+    TEST_ASSERT_EQUAL_UINT16(1, h.board);
+    TEST_ASSERT_EQUAL_UINT32(4, h.release);
+    TEST_ASSERT_EQUAL_STRING("heltec-v3", h.env);
+    TEST_ASSERT_EQUAL_STRING("2.7.26.test", h.version);
+    uint8_t o[160];
+    size_t n = encodeNode(s, 0, air.now, o, sizeof o);
+    TEST_ASSERT_EQUAL_UINT8(U_NODE, o[0]);
+    TEST_ASSERT_EQUAL_UINT8(2, o[2]);
+    TEST_ASSERT_EQUAL_UINT(13 + s.heard(0).rawLen, n);
+    TEST_ASSERT_EQUAL_UINT8(L_STATUS, o[13]);
+}
+
+static void test_status_without_env_still_parses()
+{
+    uint8_t b[27 + 3] = {L_STATUS};
+    b[26] = 3;
+    memcpy(b + 27, "1.0", 3);
+    Heard h;
+    TEST_ASSERT_TRUE(parseStatus(b, sizeof b, h));
+    TEST_ASSERT_EQUAL_STRING("1.0", h.version);
+    TEST_ASSERT_EQUAL_STRING("", h.env);
+    TEST_ASSERT_FALSE(parseStatus(b, 20, h));
+}
+
+// A card in RAM: /koldnet/lib/<dir>/{manifest.bin, raw.blocks, raw.bin}.
+struct MemStorage : public Storage {
+    struct F {
+        char path[80];
+        const uint8_t *data;
+        int32_t len;
+    } f[16];
+    size_t nf = 0;
+    const char *dirs[8];
+    size_t nd = 0;
+    void file(const char *dir, const char *name, const uint8_t *d, int32_t len)
+    {
+        snprintf(f[nf].path, sizeof f[nf].path, "/koldnet/lib/%s/%s", dir, name);
+        f[nf].data = d;
+        f[nf++].len = len;
+    }
+    void image(const char *dir, const uint8_t *man, int32_t manLen, int32_t rawLen = GOLDEN_RAW_SIZE)
+    {
+        dirs[nd++] = dir;
+        file(dir, "manifest.bin", man, manLen);
+        file(dir, "raw.blocks", GOLDEN_RAW_BLOCKS, sizeof GOLDEN_RAW_BLOCKS);
+        file(dir, "raw.bin", GOLDEN_RAW, rawLen);
+    }
+    size_t listDirs(const char *path, char (*names)[LIB_NAME], size_t max) override
+    {
+        size_t n = 0;
+        for (; n < nd && n < max; n++)
+            strncpy(names[n], dirs[n], LIB_NAME);
+        return n;
+    }
+    const F *find(const char *p)
+    {
+        for (size_t i = 0; i < nf; i++)
+            if (!strcmp(f[i].path, p))
+                return &f[i];
+        return nullptr;
+    }
+    int32_t size(const char *p) override
+    {
+        const F *x = find(p);
+        return x ? x->len : -1;
+    }
+    bool read(const char *p, uint32_t off, uint8_t *buf, size_t n) override
+    {
+        const F *x = find(p);
+        if (!x || off + n > (uint32_t)x->len)
+            return false;
+        memcpy(buf, x->data + off, n);
+        return true;
+    }
+};
+
+static void test_library_verifies_every_image_on_the_card()
+{
+    static uint8_t badSig[sizeof GOLDEN_MANIFEST];
+    memcpy(badSig, GOLDEN_MANIFEST, sizeof badSig);
+    badSig[sizeof badSig - 1] ^= 1;
+    MemStorage card;
+    card.image("heltec-v3-r5", GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST);
+    card.image("tampered", badSig, sizeof badSig);
+    card.image("short-raw", GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST, GOLDEN_RAW_SIZE - 1);
+    card.dirs[card.nd++] = "empty";
+    Library lib;
+    const uint8_t *keys[1] = {PUB};
+    TEST_ASSERT_EQUAL_UINT(4, lib.scan(card, keys, 1));
+    TEST_ASSERT_EQUAL_UINT8(0, lib.entry(0).err);
+    TEST_ASSERT_EQUAL_STRING("heltec-v3", lib.entry(0).m.env);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Err::SIGNATURE, lib.entry(1).err);
+    TEST_ASSERT_EQUAL_UINT8(LIB_RAW_SIZE, lib.entry(2).err);
+    TEST_ASSERT_EQUAL_UINT8(LIB_NO_MANIFEST, lib.entry(3).err);
+    uint8_t other[32];
+    memcpy(other, PUB, 32);
+    other[0] ^= 1;
+    const uint8_t *wrong[1] = {other};
+    lib.scan(card, wrong, 1);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Err::KEY_ID, lib.entry(0).err);
+
+    lib.scan(card, keys, 1);
+    uint8_t o[160];
+    size_t n = encodeLibEntry(lib, 0, o, sizeof o);
+    TEST_ASSERT_EQUAL_UINT8(U_LIBENT, o[0]);
+    TEST_ASSERT_EQUAL_UINT8(4, o[2]);
+    TEST_ASSERT_EQUAL_UINT8(5, o[6]); // release
+    TEST_ASSERT_EQUAL_UINT(15 + 1 + 9 + 1 + 14 + 1 + 12, n);
+
+    // The library entry is what the sender sends.
+    LibSource ls(card, lib.entry(0));
+    Rig a;
+    Air air;
+    air.add(1, &a);
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    TEST_ASSERT_TRUE(s.push(&ls, nodes, 1, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::DONE, (int)s.phase());
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, a.flash.mem, GOLDEN_RAW_SIZE);
+}
+
+static void test_library_fits_board_env_and_release()
+{
+    MemStorage card;
+    card.image("heltec-v3-r5", GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST);
+    Library lib;
+    const uint8_t *keys[1] = {PUB};
+    lib.scan(card, keys, 1);
+    Heard h;
+    h.board = 1;
+    h.release = 4;
+    strcpy(h.env, "heltec-v3");
+    TEST_ASSERT_TRUE(lib.fits(0, h));
+    strcpy(h.env, "heltec-v3-koldnet-ap"); // E: the same board, another env
+    TEST_ASSERT_FALSE(lib.fits(0, h));
+    h.env[0] = 0; // a build before U1 says no env: the board decides, the target checks the env
+    TEST_ASSERT_TRUE(lib.fits(0, h));
+    h.release = 5;
+    TEST_ASSERT_FALSE(lib.fits(0, h));
+    h.release = 4;
+    h.board = 2;
+    TEST_ASSERT_FALSE(lib.fits(0, h));
+    TEST_ASSERT_FALSE(lib.fits(1, h)); // no such entry
+}
+
+static void test_progress_frame()
+{
+    Rig a;
+    Air air;
+    air.add(1, &a);
+    MemSource src;
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    s.push(&src, nodes, 1, fastCfg(), air.now);
+    air.run(s);
+    uint8_t o[100];
+    size_t n = s.encodeProgress(air.now, o, sizeof o);
+    TEST_ASSERT_EQUAL_UINT(14 + 8, n);
+    TEST_ASSERT_EQUAL_UINT8(U_PROG, o[0]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Phase::DONE, o[1]);
+    TEST_ASSERT_EQUAL_UINT8(3, o[6]); // of 3 blocks
+    TEST_ASSERT_EQUAL_UINT8(1, o[14]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)State::DONE, o[18]);
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -552,6 +974,18 @@ void setup()
     RUN_TEST(test_radio_list_out_of_order_and_stray_frames_are_silent);
     RUN_TEST(test_radio_one_session_one_source);
     RUN_TEST(test_local_ignores_mesh_types_and_stray_data);
+    RUN_TEST(test_sender_installs_two_targets_with_one_transmission);
+    RUN_TEST(test_sender_with_losses_still_installs);
+    RUN_TEST(test_sender_asks_again_until_every_target_answered);
+    RUN_TEST(test_sender_silent_target_fails_with_no_answer);
+    RUN_TEST(test_sender_wrong_board_target_fails_the_push);
+    RUN_TEST(test_sender_refuses_an_image_the_card_changed);
+    RUN_TEST(test_sender_resumes_where_the_targets_are);
+    RUN_TEST(test_scan_lists_every_node_that_answers_with_its_env);
+    RUN_TEST(test_status_without_env_still_parses);
+    RUN_TEST(test_library_verifies_every_image_on_the_card);
+    RUN_TEST(test_library_fits_board_env_and_release);
+    RUN_TEST(test_progress_frame);
     exit(UNITY_END());
 }
 

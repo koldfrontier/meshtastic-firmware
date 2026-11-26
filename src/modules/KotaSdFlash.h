@@ -19,6 +19,8 @@ class KotaSdFlash : public kota::Flash
     void attach(const kota::Installer *i) { installer = i; }
     /** The last thing the loader did, for the boot log. */
     void logLoaderResult();
+    /** Mount the card for the field updater's library (SPEC-0003 #ota-updater); stays mounted. */
+    bool mountCard() { return mount(); }
 
     uint32_t spareSize() override;
     bool begin(uint32_t size) override;

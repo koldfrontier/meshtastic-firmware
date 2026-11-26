@@ -23,6 +23,8 @@ constexpr uint8_t U_PUSH = 0x62;     // [image u8][load permille u16][block time
 constexpr uint8_t U_PROGRESS = 0x63; // []
 constexpr uint8_t U_CANCEL = 0x64;   // []
 constexpr uint8_t U_HEARD = 0x65;    // []: one U_NODE a node heard, without a new scan
+constexpr uint8_t U_SELF = 0x66;     // [part u8: 0 manifest, 1 block list][offset u32][bytes]: this node's own image
+constexpr uint8_t IMAGE_SELF = 0xFF; // U_PUSH image number of the own image
 constexpr uint8_t U_NODE = 0x70;     // [i u8][count u8][node u32][rssi i16][snr*4 i16][age s u16][STATUS bytes]
 constexpr uint8_t U_LIBENT = 0x71;   // see encodeLibEntry
 constexpr uint8_t U_PROG = 0x72;     // see Sender::encodeProgress
@@ -237,6 +239,35 @@ class LibSource : public ImageSource
     Storage &s;
     Manifest m;
     char man[LIB_NAME + 32], list[LIB_NAME + 32], raw[LIB_NAME + 32];
+};
+
+/** This node's running image (SPEC-0003 #ota-updater-rules): the manifest and the raw block list come from the
+ *  client, in order; the raw bytes from the running app slot. The manifest must verify with one of the keys and
+ *  the list must match its signed hash; the Sender's CHECK then hashes the raw bytes against the manifest. */
+class SelfSource : public ImageSource
+{
+  public:
+    typedef bool (*RawRead)(uint32_t off, uint8_t *out, size_t n);
+    explicit SelfSource(RawRead r) : rd(r) {}
+    ~SelfSource() { delete[] list; }
+    /** One U_SELF chunk; returns 0 when taken, else a kota::Err or LErr value. */
+    uint8_t put(uint8_t part, uint32_t off, const uint8_t *b, size_t n, const uint8_t *const *keys, size_t keyCount);
+    bool complete() const { return manOk && list && listGot == listLen; }
+    size_t manifest(uint8_t *out, size_t max) override;
+    uint32_t listSize() override { return complete() ? listLen : 0; }
+    bool readList(uint32_t off, uint8_t *out, size_t n) override;
+    uint32_t rawSize() override { return manOk ? m.rawSize : 0; }
+    bool readRaw(uint32_t off, uint8_t *out, size_t n) override { return rd && rd(off, out, n); }
+    const Manifest &mf() const { return m; }
+
+  private:
+    RawRead rd;
+    uint8_t man[MAX_MANIFEST] = {};
+    size_t manLen = 0;
+    bool manOk = false;
+    Manifest m;
+    uint8_t *list = nullptr;
+    uint32_t listLen = 0, listGot = 0;
 };
 
 /** U_LIBENT: [i][count][err][board u16][release u32][raw size u32][flags][env len][env][ver len][ver][name len][name] */

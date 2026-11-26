@@ -622,6 +622,60 @@ bool LibSource::readRaw(uint32_t off, uint8_t *out, size_t n)
     return s.read(raw, off, out, n);
 }
 
+uint8_t SelfSource::put(uint8_t part, uint32_t off, const uint8_t *b, size_t n, const uint8_t *const *keys,
+                        size_t keyCount)
+{
+    if (part == 0) {
+        if (off == 0) { // a new upload
+            manLen = 0;
+            manOk = false;
+            delete[] list;
+            list = nullptr;
+            listLen = listGot = 0;
+        }
+        if (off != manLen || off + n > MAX_MANIFEST)
+            return (uint8_t)LErr::SEQUENCE;
+        memcpy(man + off, b, n);
+        manLen += n;
+        Err v = Err::KEY_ID;
+        for (size_t i = 0; i < keyCount && v != Err::OK; i++)
+            v = verify(man, manLen, keys[i], m);
+        manOk = v == Err::OK; // complete when it verifies; until then more chunks are expected
+        if (manOk) {
+            listLen = blockCount(m.rawSize) * HASH;
+            list = new uint8_t[listLen];
+            if (!list)
+                return (uint8_t)LErr::MEMORY;
+        }
+        return 0;
+    }
+    if (part != 1 || !manOk || !list || off != listGot || off + n > listLen)
+        return (uint8_t)LErr::SEQUENCE;
+    memcpy(list + off, b, n);
+    listGot += n;
+    if (listGot == listLen && checkBlockList(m.rawListSha, m.rawSize, list, listLen) != Err::OK) {
+        listGot = 0; // refused: upload the list again
+        return (uint8_t)Err::BLOCK_LIST;
+    }
+    return 0;
+}
+
+size_t SelfSource::manifest(uint8_t *out, size_t max)
+{
+    if (!manOk || max < manLen)
+        return 0;
+    memcpy(out, man, manLen);
+    return manLen;
+}
+
+bool SelfSource::readList(uint32_t off, uint8_t *out, size_t n)
+{
+    if (!complete() || off + n > listLen)
+        return false;
+    memcpy(out, list + off, n);
+    return true;
+}
+
 size_t encodeLibEntry(const Library &lib, size_t i, uint8_t *o, size_t max)
 {
     if (i >= lib.count())

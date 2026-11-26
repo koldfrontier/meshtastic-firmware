@@ -952,6 +952,52 @@ static void test_progress_frame()
     TEST_ASSERT_EQUAL_UINT8((uint8_t)State::DONE, o[18]);
 }
 
+static bool goldenRaw(uint32_t off, uint8_t *out, size_t n)
+{
+    if (off + n > GOLDEN_RAW_SIZE)
+        return false;
+    memcpy(out, GOLDEN_RAW + off, n);
+    return true;
+}
+
+static void test_own_image_is_uploaded_checked_and_sent()
+{
+    const uint8_t *keys[1] = {PUB};
+    SelfSource me(goldenRaw);
+    TEST_ASSERT_EQUAL_UINT8(0, me.put(0, 0, GOLDEN_MANIFEST, 200, keys, 1));
+    TEST_ASSERT_FALSE(me.complete());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)LErr::SEQUENCE, me.put(1, 0, GOLDEN_RAW_BLOCKS, 32, keys, 1)); // before the manifest
+    TEST_ASSERT_EQUAL_UINT8(0, me.put(0, 200, GOLDEN_MANIFEST + 200, sizeof GOLDEN_MANIFEST - 200, keys, 1));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)LErr::SEQUENCE, me.put(1, 32, GOLDEN_RAW_BLOCKS + 32, 32, keys, 1)); // out of order
+    uint8_t bad[sizeof GOLDEN_RAW_BLOCKS];
+    memcpy(bad, GOLDEN_RAW_BLOCKS, sizeof bad);
+    bad[40] ^= 1;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Err::BLOCK_LIST, me.put(1, 0, bad, sizeof bad, keys, 1));
+    TEST_ASSERT_FALSE(me.complete());
+    TEST_ASSERT_EQUAL_UINT8(0, me.put(1, 0, GOLDEN_RAW_BLOCKS, 64, keys, 1));
+    TEST_ASSERT_EQUAL_UINT8(0, me.put(1, 64, GOLDEN_RAW_BLOCKS + 64, 32, keys, 1));
+    TEST_ASSERT_TRUE(me.complete());
+
+    Rig a;
+    Air air;
+    air.add(1, &a);
+    Sender s(air);
+    uint32_t nodes[1] = {1};
+    TEST_ASSERT_TRUE(s.push(&me, nodes, 1, fastCfg(), air.now));
+    air.run(s);
+    TEST_ASSERT_EQUAL_INT((int)Phase::DONE, (int)s.phase());
+    TEST_ASSERT_EQUAL_MEMORY(GOLDEN_RAW, a.flash.mem, GOLDEN_RAW_SIZE);
+
+    uint8_t other[32];
+    memcpy(other, PUB, 32);
+    other[0] ^= 1;
+    const uint8_t *wrong[1] = {other};
+    SelfSource you(goldenRaw);
+    you.put(0, 0, GOLDEN_MANIFEST, sizeof GOLDEN_MANIFEST, wrong, 1);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)LErr::SEQUENCE, you.put(1, 0, GOLDEN_RAW_BLOCKS, 32, wrong, 1)); // never verified
+    TEST_ASSERT_FALSE(you.complete());
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -986,6 +1032,7 @@ void setup()
     RUN_TEST(test_library_verifies_every_image_on_the_card);
     RUN_TEST(test_library_fits_board_env_and_release);
     RUN_TEST(test_progress_frame);
+    RUN_TEST(test_own_image_is_uploaded_checked_and_sent);
     exit(UNITY_END());
 }
 

@@ -227,6 +227,12 @@ UpdaterRadio updaterRadio;
 kota::Sender *sender;
 kota::Library library;
 kota::LibSource *source;
+bool readRunning(uint32_t off, uint8_t *out, size_t n)
+{
+    const esp_partition_t *p = esp_ota_get_running_partition();
+    return p && off + n <= p->size && esp_partition_read(p, off, out, n) == ESP_OK;
+}
+kota::SelfSource *self;
 #endif
 
 uint8_t slotOf(const esp_partition_t *p)
@@ -498,6 +504,25 @@ void KotaModule::handleUpdater(const uint8_t *b, size_t n)
         emitIdx = 0;
         break;
     }
+    case kota::U_SELF: {
+        // [part u8][offset u32][bytes]
+        if (n < 6) {
+            ack(cmd, (uint8_t)kota::UErr::BAD_FRAME);
+            break;
+        }
+        if (sender->busy()) {
+            ack(cmd, (uint8_t)kota::UErr::BUSY);
+            break;
+        }
+        if (!self)
+            self = new kota::SelfSource(readRunning);
+        uint32_t off = (uint32_t)b[2] | ((uint32_t)b[3] << 8) | ((uint32_t)b[4] << 16) | ((uint32_t)b[5] << 24);
+        uint8_t r = self->put(b[1], off, b + 6, n - 6, identity.keys, identity.keyCount);
+        ack(cmd, r, self->complete() ? 1 : 0); // result: 0 taken, else the error; extra: 1 when complete
+        if (self->complete() && r == 0)
+            LOG_INFO("KOTA updater: own image %s r%u ready to send", self->mf().version, (unsigned)self->mf().release);
+        break;
+    }
     case kota::U_PUSH: {
         // [image u8][load permille u16][block timeout ms u16][n u8][node u32 x n]
         if (n < 7 || n < 7u + 4u * b[6]) {
@@ -509,7 +534,8 @@ void KotaModule::handleUpdater(const uint8_t *b, size_t n)
             break;
         }
         uint8_t img = b[1];
-        if (img >= library.count() || library.entry(img).err != 0) {
+        bool own = img == kota::IMAGE_SELF;
+        if (own ? !(self && self->complete()) : (img >= library.count() || library.entry(img).err != 0)) {
             ack(cmd, (uint8_t)kota::UErr::NO_IMAGE);
             break;
         }
@@ -525,13 +551,16 @@ void KotaModule::handleUpdater(const uint8_t *b, size_t n)
             c.loadPermille = load;
         if (bt)
             c.blockTimeoutMs = bt;
-        delete source;
-        source = new kota::LibSource(storage, library.entry(img));
-        bool ok = k > 0 && sender->push(source, nodes, k, c, now);
+        kota::ImageSource *src = self;
+        if (!own) {
+            delete source;
+            source = new kota::LibSource(storage, library.entry(img));
+            src = source;
+        }
+        bool ok = k > 0 && sender->push(src, nodes, k, c, now);
         ack(cmd, ok ? 0 : (uint8_t)(k ? kota::UErr::NO_IMAGE : kota::UErr::NO_TARGET));
         if (ok)
-            LOG_INFO("KOTA updater: push %s r%u to %u nodes", library.entry(img).name,
-                     (unsigned)library.entry(img).m.release, (unsigned)k);
+            LOG_INFO("KOTA updater: push %s to %u nodes", own ? "own image" : library.entry(img).name, (unsigned)k);
         break;
     }
     case kota::U_PROGRESS: {

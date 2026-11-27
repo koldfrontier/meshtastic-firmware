@@ -24,6 +24,7 @@
 static const char *DIR = "/koldnet";
 static const char *IMAGE = "/koldnet/ota.bin";
 static const char *MANIFEST = "/koldnet/ota.man";
+static const char *HEAP_KEY = "failheap"; // free and largest heap block when staging last failed to finish
 
 static SPIClass *bus;
 
@@ -145,42 +146,65 @@ bool KotaSdFlash::write(const uint8_t *d, size_t n)
     return true;
 }
 
+bool KotaSdFlash::finishFailed(uint8_t step)
+{
+    // A serial API client hides the log, so the step and the heap are kept for the next boot's log.
+    uint32_t heap[2] = {ESP.getFreeHeap(), ESP.getMaxAllocHeap()};
+    LOG_ERROR("KOTA: staging could not finish, step 0x%02x; free heap %u, largest %u", (unsigned)step, (unsigned)heap[0],
+              (unsigned)heap[1]);
+    unmount();
+    kota::LoaderRec r;
+    if (!loadRec(r))
+        r = kota::LoaderRec();
+    r.detail = step;
+    storeRec(r);
+    Preferences p; // its own key: the loader's record keeps its layout
+    if (p.begin(kota::LOADER_NVS, false)) {
+        p.putBytes(HEAP_KEY, heap, sizeof heap);
+        p.end();
+    }
+    return false;
+}
+
 bool KotaSdFlash::end()
 {
     mbedtls_sha256_finish_ret(&sha, written);
     mbedtls_sha256_free(&sha);
     f.close();
-    bool ok = got == want;
-    File in = ok ? SD.open(IMAGE, FILE_READ) : File();
-    ok = ok && in && in.size() == want;
-    uint8_t *buf = ok ? (uint8_t *)malloc(kota::BLOCK) : nullptr;
-    ok = ok && buf;
-    if (ok) {
-        mbedtls_sha256_context c;
-        mbedtls_sha256_init(&c);
-        mbedtls_sha256_starts_ret(&c, 0);
-        uint32_t left = want;
-        while (ok && left) {
-            size_t n = left < kota::BLOCK ? left : kota::BLOCK;
-            ok = in.read(buf, n) == n;
-            // ESP image header: magic 0xE9, chip id 0 (ESP32) at offset 12
-            if (ok && left == want)
-                ok = buf[0] == 0xE9 && buf[12] == 0 && buf[13] == 0;
-            mbedtls_sha256_update_ret(&c, buf, n);
-            left -= n;
-        }
-        uint8_t back[kota::HASH];
-        mbedtls_sha256_finish_ret(&c, back);
-        mbedtls_sha256_free(&c);
-        ok = ok && memcmp(back, written, sizeof back) == 0;
-    }
-    free(buf);
-    if (in)
+    if (got != want)
+        return finishFailed(0xC1);
+    File in = SD.open(IMAGE, FILE_READ);
+    if (!in)
+        return finishFailed(0xC2);
+    if (in.size() != want) {
         in.close();
-    LOG_INFO("KOTA: staged image %s, %u bytes", ok ? "reads back" : "does NOT read back", (unsigned)got);
-    if (!ok)
-        unmount();
-    return ok;
+        return finishFailed(0xC3);
+    }
+    // Static, not from the heap: this runs at the end of an install, when the heap is at its lowest.
+    static uint8_t buf[1024];
+    mbedtls_sha256_context c;
+    mbedtls_sha256_init(&c);
+    mbedtls_sha256_starts_ret(&c, 0);
+    uint8_t step = 0;
+    for (uint32_t left = want; left && !step;) {
+        size_t n = left < sizeof buf ? left : sizeof buf;
+        if (in.read(buf, n) != n)
+            step = 0xC4;
+        // ESP image header: magic 0xE9, chip id 0 (ESP32) at offset 12
+        else if (left == want && !(buf[0] == 0xE9 && buf[12] == 0 && buf[13] == 0))
+            step = 0xC5;
+        else
+            mbedtls_sha256_update_ret(&c, buf, n);
+        left -= n;
+    }
+    uint8_t back[kota::HASH];
+    mbedtls_sha256_finish_ret(&c, back);
+    mbedtls_sha256_free(&c);
+    in.close();
+    if (!step && memcmp(back, written, sizeof back) != 0)
+        step = 0xC6;
+    LOG_INFO("KOTA: staged image %s, %u bytes", step ? "does NOT read back" : "reads back", (unsigned)got);
+    return step ? finishFailed(step) : true;
 }
 
 bool KotaSdFlash::setBoot()
@@ -188,13 +212,15 @@ bool KotaSdFlash::setBoot()
     size_t len = 0;
     const uint8_t *man = installer ? installer->manifestBytes(len) : nullptr;
     const esp_partition_t *l = loader();
-    bool ok = man && len && l;
-    if (ok) {
-        File m = SD.open(MANIFEST, FILE_WRITE);
-        ok = m && m.write(man, len) == len;
-        if (m)
-            m.close();
-    }
+    if (!man || !len || !l)
+        return finishFailed(0xD1);
+    File m = SD.open(MANIFEST, FILE_WRITE);
+    if (!m)
+        return finishFailed(0xD2);
+    bool ok = m.write(man, len) == len;
+    m.close();
+    if (!ok)
+        return finishFailed(0xD3);
 #if KOLDNET_KOTA_TEST_TAMPER_RELEASE
     if (ok && installer->manifest().release == KOLDNET_KOTA_TEST_TAMPER_RELEASE) {
         File t = SD.open(IMAGE, "r+");
@@ -207,8 +233,6 @@ bool KotaSdFlash::setBoot()
     }
 #endif
     unmount();
-    if (!ok)
-        return false;
     kota::LoaderRec r;
     if (!loadRec(r))
         r = kota::LoaderRec();
@@ -217,7 +241,11 @@ bool KotaSdFlash::setBoot()
     mbedtls_sha256_ret(man, len, r.want, 0);
     r.result = kota::LoaderResult::NONE;
     r.detail = 0;
-    return storeRec(r) && esp_ota_set_boot_partition(l) == ESP_OK;
+    if (!storeRec(r))
+        return finishFailed(0xD4);
+    if (esp_ota_set_boot_partition(l) != ESP_OK)
+        return finishFailed(0xD5);
+    return true;
 }
 
 void KotaSdFlash::abort()
@@ -255,6 +283,13 @@ void KotaSdFlash::logLoaderResult()
     if (loadRec(r))
         LOG_INFO("KOTA: loader phase %u result %u detail 0x%02x, previous image %u bytes", (unsigned)r.phase,
                  (unsigned)r.result, (unsigned)r.detail, (unsigned)r.prevLen);
+    Preferences p;
+    uint32_t heap[2] = {};
+    if (p.begin(kota::LOADER_NVS, true)) {
+        if (p.getBytes(HEAP_KEY, heap, sizeof heap) == sizeof heap)
+            LOG_INFO("KOTA: the last failed staging had free heap %u, largest %u", (unsigned)heap[0], (unsigned)heap[1]);
+        p.end();
+    }
     // No mount at boot: once the card has been initialised it holds GPIO2 (its DAT0) high until it loses power,
     // and the ROM then refuses USB download mode (TASK-20261125-02, 11:02). The card is mounted only to stage.
 }

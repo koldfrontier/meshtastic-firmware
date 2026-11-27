@@ -19,6 +19,8 @@ class KotaSdFlash : public kota::Flash
     void attach(const kota::Installer *i) { installer = i; }
     /** The last thing the loader did, for the boot log. */
     void logLoaderResult();
+    /** A failed end() or setBoot() keeps its step (0xC1 to 0xD5) in the loader record's detail. */
+    bool finishFailed(uint8_t step);
     /** Mount the card for the field updater's library (SPEC-0003 #ota-updater); stays mounted. */
     bool mountCard() { return mount(); }
 

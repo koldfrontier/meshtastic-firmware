@@ -283,11 +283,13 @@ Reply Installer::onFinish(const uint8_t *b, size_t n)
     Err e = raw.finish(m.rawSha, m.rawSize);
     if (e != Err::OK)
         return fail((uint8_t)e);
+    // The image has checked: the 17 KB block list is not needed again, and the LoRa32's end() reads the
+    // staged image back from the card with the heap it leaves (TASK-20261125-14).
+    free(list);
+    list = nullptr;
     flashOpen = false;
     if (!flash.end() || !flash.setBoot())
         return fail((uint8_t)LErr::FLASH);
-    free(list);
-    list = nullptr;
     st = State::DONE;
     err = 0;
     reboot = n >= 1 && b[0] == 1;

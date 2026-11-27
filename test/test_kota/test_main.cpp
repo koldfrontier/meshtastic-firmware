@@ -187,6 +187,8 @@ class RamFlash : public Flash
     uint8_t mem[16384];
     uint32_t written = 0;
     bool begun = false, ended = false, booted = false, aborted = false, failWrite = false;
+    const Installer *watch = nullptr; // set: end() records whether the installer still holds its block list
+    bool listAtEnd = false;
     uint32_t spareSize() override { return spare; }
     bool begin(uint32_t size) override
     {
@@ -202,7 +204,11 @@ class RamFlash : public Flash
         written += n;
         return true;
     }
-    bool end() override { return ended = true; }
+    bool end() override
+    {
+        listAtEnd = watch && watch->holdsBlockList();
+        return ended = true;
+    }
     bool setBoot() override { return booted = true; }
     void abort() override { aborted = true; }
 };
@@ -331,6 +337,23 @@ static void test_local_install_happy_path()
     TEST_ASSERT_EQUAL_UINT8((uint8_t)State::DONE, st[1]);
     TEST_ASSERT_EQUAL_UINT8(3, st[3]); // next block
     TEST_ASSERT_EQUAL_UINT8(3, st[5]); // blocks
+}
+
+// The LoRa32 stages on its card and reads the image back in end(): the 17 KB block list is not needed after
+// the image hash checks, and holding it then left too little heap on the updater build (TASK-20261125-14).
+static void test_finish_releases_the_block_list_before_staging_ends()
+{
+    Rig r;
+    r.flash.watch = r.ins;
+    r.toData();
+    TEST_ASSERT_TRUE(r.ins->holdsBlockList());
+    for (uint16_t i = 0; i < 3; i++)
+        TEST_ASSERT_EQUAL_INT((int)Reply::BLOCK, (int)r.block(i, GOLDEN_RAW + i * BLOCK));
+    TEST_ASSERT_EQUAL_INT((int)Reply::STATUS, (int)r.finish());
+    ASSERT_STATE(r, State::DONE);
+    TEST_ASSERT_TRUE(r.flash.ended);
+    TEST_ASSERT_FALSE(r.flash.listAtEnd);
+    TEST_ASSERT_FALSE(r.ins->holdsBlockList());
 }
 
 // Acceptance 1 on the installer: nothing is written and the boot slot is not touched.
@@ -1172,6 +1195,7 @@ void setup()
     RUN_TEST(test_block_lists_and_blocks);
     RUN_TEST(test_inplace_bound_matches_the_host);
     RUN_TEST(test_local_install_happy_path);
+    RUN_TEST(test_finish_releases_the_block_list_before_staging_ends);
     RUN_TEST(test_local_refusals_touch_no_flash);
     RUN_TEST(test_local_bad_block_is_not_written_and_can_be_resent);
     RUN_TEST(test_local_lost_frame_and_duplicate_block);

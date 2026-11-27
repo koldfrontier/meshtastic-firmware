@@ -102,6 +102,8 @@ class Installer
     /** FINISH asked for a reboot, and the boot slot is set. */
     bool rebootRequested() const { return reboot; }
     const Manifest &manifest() const { return m; }
+    /** The block list is held from LIST until the image hash checks at FINISH. */
+    bool holdsBlockList() const { return list != nullptr; }
     /** The manifest as received, for a Flash that stores it (KotaSdFlash). Valid in setBoot(). */
     const uint8_t *manifestBytes(size_t &len) const
     {

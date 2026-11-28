@@ -14,7 +14,25 @@
 #include "HWCDC.h"
 #if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
 #include "tusb.h" // koldnet: tud_cdc_n_connected, see runOnce
+#include "USBCDC.h"
+#include "esp32-hal-tinyusb.h"
+#define KOLDNET_USB_REBOOT_GUARD
 #endif
+#endif
+
+#ifdef KOLDNET_USB_REBOOT_GUARD
+// koldnet (TASK-20261125-14): the Arduino core reboots into the ROM loader on two host signals, the
+// esptool-style DTR/RTS sequence and a 1200-baud line coding. A host program that opens and closes every COM
+// port (the CyberPower PowerPanel service on the bench PC) tripped it and left the T-Beam 1W in the ROM loader.
+// Turn the core's handling off and honour only the 1200-baud request, which is what flash_esp.py sends.
+static void onUsbCdcLineCoding(void *, esp_event_base_t, int32_t id, void *data)
+{
+    if (id != ARDUINO_USB_CDC_LINE_CODING_EVENT || data == nullptr)
+        return;
+    auto *e = static_cast<arduino_usb_cdc_event_data_t *>(data);
+    if (e->line_coding.bit_rate == 1200)
+        usb_persist_restart(RESTART_BOOTLOADER);
+}
 #endif
 
 #ifdef RP2040_SLOW_CLOCK
@@ -65,6 +83,10 @@ SerialConsole::SerialConsole() : StreamAPI(&Port), RedirectablePrint(&Port), con
     Port.setRX(SERIAL2_RX);
 #endif
     Port.begin(SERIAL_BAUD);
+#ifdef KOLDNET_USB_REBOOT_GUARD
+    Serial.enableReboot(false);
+    Serial.onEvent(ARDUINO_USB_CDC_LINE_CODING_EVENT, onUsbCdcLineCoding);
+#endif
 #if defined(ARCH_NRF52) || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARCH_RP2040) ||   \
     defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6)
     time_t timeout = millis();
